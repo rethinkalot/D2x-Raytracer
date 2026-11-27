@@ -95,8 +95,8 @@ file(GLOB UI_SOURCES
 )
 endif()
 
-if(CMAKE_BUILD_TYPE MATCHES Release)
-#disable console on release.
+if(CMAKE_BUILD_TYPE MATCHES "Release|RelWithDebInfo")
+#no console window on release builds (incl. RelWithDebInfo); -debug opens one on demand.
 add_executable(descent2 WIN32)
 else()
 add_executable(descent2)

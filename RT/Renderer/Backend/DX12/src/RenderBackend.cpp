@@ -541,9 +541,190 @@ namespace
 		return result;
 	}
 
+	// -----------------------------------------------------------------------------------------------------
+	// Shader cache: compiled shaders are saved to shader_cache/ next to the game, so later launches skip
+	// DXC. The key covers the CONTENT of every file under assets/shaders (shaders include each other),
+	// plus the file, entry point, target, defines and compile settings, so any shader edit recompiles.
+
+	static uint64_t ShaderCacheHash(uint64_t h, const void *data, size_t size)
+	{
+		const uint8_t *p = (const uint8_t *)data;
+		for (size_t i = 0; i < size; i++)
+			h = (h ^ p[i]) * 1099511628211ull; // FNV-1a 64
+		return h;
+	}
+
+	static uint64_t ShaderCacheHashWide(uint64_t h, const wchar_t *s)
+	{
+		h = ShaderCacheHash(h, s, s ? wcslen(s) * sizeof(wchar_t) : 0);
+		return ShaderCacheHash(h, "|", 1);
+	}
+
+	static uint64_t ShaderCacheHashFolder(uint64_t h, const wchar_t *dir)
+	{
+		wchar_t pattern[MAX_PATH];
+		swprintf(pattern, MAX_PATH, L"%s/*", dir);
+		WIN32_FIND_DATAW fd;
+		HANDLE find = FindFirstFileW(pattern, &fd);
+		if (find == INVALID_HANDLE_VALUE)
+			return h;
+		do
+		{
+			if (fd.cFileName[0] == L'.')
+				continue;
+			wchar_t path[MAX_PATH];
+			swprintf(path, MAX_PATH, L"%s/%s", dir, fd.cFileName);
+			h = ShaderCacheHashWide(h, fd.cFileName);
+			if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+			{
+				h = ShaderCacheHashFolder(h, path);
+				continue;
+			}
+			FILE *f = _wfopen(path, L"rb");
+			if (!f)
+				continue;
+			uint8_t buf[16384];
+			size_t n;
+			while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+				h = ShaderCacheHash(h, buf, n);
+			fclose(f);
+		} while (FindNextFileW(find, &fd));
+		FindClose(find);
+		return h;
+	}
+
+	// Deletes everything in shader_cache/ except the folder for the current shader version, so
+	// shaders compiled from older shader files never pile up.
+	static void ShaderCacheDeleteTree(const wchar_t *dir)
+	{
+		wchar_t pattern[MAX_PATH];
+		swprintf(pattern, MAX_PATH, L"%s/*", dir);
+		WIN32_FIND_DATAW fd;
+		HANDLE find = FindFirstFileW(pattern, &fd);
+		if (find != INVALID_HANDLE_VALUE)
+		{
+			do
+			{
+				if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L".."))
+					continue;
+				wchar_t path[MAX_PATH];
+				swprintf(path, MAX_PATH, L"%s/%s", dir, fd.cFileName);
+				if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+					ShaderCacheDeleteTree(path);
+				else
+					DeleteFileW(path);
+			} while (FindNextFileW(find, &fd));
+			FindClose(find);
+		}
+		RemoveDirectoryW(dir);
+	}
+
+	static void ShaderCachePruneOldVersions(uint64_t source_hash)
+	{
+		wchar_t keep[32];
+		swprintf(keep, 32, L"%016llx", (unsigned long long)source_hash);
+		WIN32_FIND_DATAW fd;
+		HANDLE find = FindFirstFileW(L"shader_cache/*", &fd);
+		if (find == INVALID_HANDLE_VALUE)
+			return;
+		do
+		{
+			if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..") || !wcscmp(fd.cFileName, keep))
+				continue;
+			wchar_t path[MAX_PATH];
+			swprintf(path, MAX_PATH, L"shader_cache/%s", fd.cFileName);
+			if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+				ShaderCacheDeleteTree(path);
+			else
+				DeleteFileW(path);
+		} while (FindNextFileW(find, &fd));
+		FindClose(find);
+	}
+
+	// Hash of everything under assets/shaders, refreshed at most once a second (startup compiles
+	// dozens of shaders back to back; a later hot-reload sees the edited files). Whenever it
+	// changes, the cache for the old shader files is deleted.
+	static uint64_t ShaderCacheSourceHash()
+	{
+		static uint64_t hash = 0;
+		static ULONGLONG computed_at = 0;
+		const ULONGLONG now = GetTickCount64();
+		if (!hash || now - computed_at > 1000)
+		{
+			const uint64_t new_hash = ShaderCacheHashFolder(14695981039346656037ull, L"assets/shaders");
+			if (new_hash != hash)
+				ShaderCachePruneOldVersions(new_hash);
+			hash = new_hash;
+			computed_at = now;
+		}
+		return hash;
+	}
+
+	static void ShaderCachePath(wchar_t *out, size_t out_count, uint64_t key)
+	{
+		swprintf(out, out_count, L"shader_cache/%016llx/%016llx.dxil", (unsigned long long)ShaderCacheSourceHash(), (unsigned long long)key);
+	}
+
+	static IDxcBlob *ShaderCacheLoad(uint64_t key)
+	{
+		wchar_t path[MAX_PATH];
+		ShaderCachePath(path, MAX_PATH, key);
+		FILE *f = _wfopen(path, L"rb");
+		if (!f)
+			return nullptr;
+		fseek(f, 0, SEEK_END);
+		long size = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		IDxcBlobEncoding *blob = nullptr;
+		if (size > 0)
+		{
+			void *data = malloc((size_t)size);
+			if (data && fread(data, 1, (size_t)size, f) == (size_t)size)
+				g_d3d.dxc_utils->CreateBlob(data, (UINT32)size, 0, &blob);
+			free(data);
+		}
+		fclose(f);
+		return blob;
+	}
+
+	static void ShaderCacheStore(uint64_t key, IDxcBlob *blob)
+	{
+		wchar_t path[MAX_PATH], dir[64];
+		CreateDirectoryW(L"shader_cache", nullptr);
+		swprintf(dir, 64, L"shader_cache/%016llx", (unsigned long long)ShaderCacheSourceHash());
+		CreateDirectoryW(dir, nullptr);
+		ShaderCachePath(path, MAX_PATH, key);
+		FILE *f = _wfopen(path, L"wb");
+		if (!f)
+			return;
+		fwrite(blob->GetBufferPointer(), 1, blob->GetBufferSize(), f);
+		fclose(f);
+	}
+
 	IDxcBlob *CompileShader(const wchar_t *file_name, const wchar_t *entry_point, const wchar_t *target_profile, uint32_t num_defines = 0, const DxcDefine *defines = nullptr)
 	{
         HRESULT hr;
+
+		uint64_t cache_key = ShaderCacheSourceHash();
+		cache_key = ShaderCacheHashWide(cache_key, file_name);
+		cache_key = ShaderCacheHashWide(cache_key, entry_point);
+		cache_key = ShaderCacheHashWide(cache_key, target_profile);
+		for (uint32_t i = 0; i < num_defines; i++)
+		{
+			cache_key = ShaderCacheHashWide(cache_key, defines[i].Name);
+			cache_key = ShaderCacheHashWide(cache_key, defines[i].Value);
+		}
+		// Compile settings that change the output (see arguments below)
+#ifdef SHIPPING_BUILD
+		cache_key = ShaderCacheHashWide(cache_key, L"shipping");
+#endif
+#ifdef _DEBUG
+		cache_key = ShaderCacheHashWide(cache_key, L"debug");
+#endif
+		cache_key = ShaderCacheHashWide(cache_key, L"O3 rowmajor HV2021 v1");
+
+		if (IDxcBlob *cached = ShaderCacheLoad(cache_key))
+			return cached;
 
 		UINT32 codepage = 0;
 
@@ -589,6 +770,9 @@ namespace
 
 		IDxcBlob *blob;
 		result->GetResult(&blob);
+
+		if (blob)
+			ShaderCacheStore(cache_key, blob);
 
 		return blob;
 	}
@@ -3563,7 +3747,7 @@ static void CaptureDesktopScreenshot(ID3D12Resource* desktop=nullptr) {
 
 		readback->Unmap(0, nullptr);
 	}
-
+
     if(!sourceView.IsNull()) g_d3d.cbv_srv_uav.Free(sourceView);
 }
 
