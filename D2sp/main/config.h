@@ -56,6 +56,7 @@ typedef struct Cfg
 	// it, and the menu item is a check that reads "on" in both cases.
 	int ReducedFlash;
 	int FPSIndicator;
+	int FOV; // horizontal field of view in degrees, 90-120 (90 = stock Descent at 16:9; same math as the raytracer)
 	int Grabinput;
 	int ClassicDepth;
 	int BorderlessWindow;

@@ -69,6 +69,7 @@ static const char CustomTexturesStr[] ="CustomTextures";
 static const char ReducedFlashStr[] ="ReducedFlash";
 static const char ClassicDepthStr[] ="ClassicDepth";
 static const char FPSIndicatorStr[] ="FPSIndicator";
+static const char FOVStr[] ="FOV";
 static const char GrabinputStr[] ="GrabInput";
 static const char BorderlessWindowStr[] ="BorderlessWindow";
 static const char GamePortStr[] ="GamePort";
@@ -145,6 +146,7 @@ int ReadConfigFile()
 	GameCfg.ReducedFlash = 0;
 	GameCfg.ClassicDepth = 0;
 	GameCfg.FPSIndicator = 0;
+	GameCfg.FOV = 90;
 	GameCfg.Grabinput = 1;
 	GameCfg.BorderlessWindow = 0;
 	GameCfg.GamePort = 0;
@@ -272,6 +274,12 @@ int ReadConfigFile()
 				GameCfg.ClassicDepth = strtol(value, NULL, 10);
 			else if (!strcmp(token, FPSIndicatorStr))
 				GameCfg.FPSIndicator = strtol(value, NULL, 10);
+			else if (!strcmp(token, FOVStr))
+			{
+				GameCfg.FOV = strtol(value, NULL, 10);
+				if (GameCfg.FOV < 90) GameCfg.FOV = 90;
+				if (GameCfg.FOV > 120) GameCfg.FOV = 120;
+			}
 			else if (!strcmp(token, GrabinputStr))
 				GameCfg.Grabinput = strtol(value, NULL, 10);
 			else if (!strcmp(token, BorderlessWindowStr))
@@ -348,6 +356,7 @@ int WriteConfigFile()
 	PHYSFSX_printf(infile, "%s=%i\n", ReducedFlashStr, GameCfg.ReducedFlash);
 	PHYSFSX_printf(infile, "%s=%i\n", ClassicDepthStr, GameCfg.ClassicDepth);
 	PHYSFSX_printf(infile, "%s=%i\n", FPSIndicatorStr, GameCfg.FPSIndicator);
+	PHYSFSX_printf(infile, "%s=%i\n", FOVStr, GameCfg.FOV);
 	PHYSFSX_printf(infile, "%s=%i\n", GrabinputStr, GameCfg.Grabinput);
 	PHYSFSX_printf(infile, "%s=%i\n", BorderlessWindowStr, GameCfg.BorderlessWindow);
 	PHYSFSX_printf(infile, "%s=%i\n", GamePortStr, GameCfg.GamePort);

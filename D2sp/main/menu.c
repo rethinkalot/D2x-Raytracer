@@ -1997,7 +1997,8 @@ void reticle_config()
 int opt_gr_briefingrobots3d;
 int opt_gr_texfilt, opt_gr_movietexfilt, opt_gr_brightness, opt_gr_reticlemenu, opt_gr_alphafx, opt_gr_dynlightcolor, opt_gr_vsync, opt_gr_multisample, opt_gr_fpsindi, opt_gr_disablecockpit;
 int opt_gr_classicdepth;
-int opt_gr_custommodels, opt_gr_customtextures, opt_gr_reducedflash;
+int opt_gr_custommodels, opt_gr_customtextures, opt_gr_reducedflash, opt_gr_fov;
+static char gr_fov_label[24];
 int graphics_config_menuset(newmenu *menu, d_event *event, void *userdata)
 {
 	newmenu_item *items = newmenu_get_items(menu);
@@ -2008,6 +2009,13 @@ int graphics_config_menuset(newmenu *menu, d_event *event, void *userdata)
 	switch (event->type)
 	{
 		case EVENT_NEWMENU_CHANGED:
+#ifdef OGL
+			if (citem == opt_gr_fov) // live: label and view follow the slider
+			{
+				GameCfg.FOV = 90 + 2 * items[opt_gr_fov].value;
+				snprintf(gr_fov_label, sizeof(gr_fov_label), "FOV: %d", GameCfg.FOV);
+			}
+#endif
 			if ( citem == opt_gr_texfilt + 3
 #ifdef OGL
 				&& ogl_maxanisotropy <= 1.0
@@ -2064,6 +2072,10 @@ void graphics_config()
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Movie Filter"; m[nitems].value = GameCfg.MovieTexFilt; nitems++;
 	opt_gr_briefingrobots3d = nitems;
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "3D Briefing Robots"; m[nitems].value = GameCfg.BriefingRobots3D; nitems++;
+	// FOV 90-120, 2 degrees per notch (live: the label and the view follow the slider).
+	snprintf(gr_fov_label, sizeof(gr_fov_label), "FOV: %d", GameCfg.FOV);
+	opt_gr_fov = nitems;
+	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = gr_fov_label; m[nitems].value = (GameCfg.FOV - 90) / 2; m[nitems].min_value = 0; m[nitems].max_value = 15; nitems++;
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
 #endif
 	opt_gr_brightness = nitems;
@@ -2073,8 +2085,7 @@ void graphics_config()
 #ifdef OGL
 	opt_gr_alphafx = nitems;
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Transparency Effects"; m[nitems].value = PlayerCfg.AlphaEffects; nitems++;
-	opt_gr_dynlightcolor = nitems;
-	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Colored Dynamic Light"; m[nitems].value = PlayerCfg.DynLightColor; nitems++;
+	opt_gr_dynlightcolor = -1; // hidden from the menu (setting kept in the pilot file)
 // VSync option is shown ONLY when the video backend can genuinely control vsync
 // (see gr_vsync_supported()). On the current SDL 1.2 backend it stays hidden,
 // because that API layer has no way to enable, disable or even query vsync --
@@ -2098,8 +2109,7 @@ void graphics_config()
 	}
 	opt_gr_multisample = nitems;
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text="4x multisampling"; m[nitems].value = GameCfg.Multisample; nitems++;
-	opt_gr_classicdepth = nitems;
-	m[nitems].type = NM_TYPE_CHECK; m[nitems].text="Classic Depth Ordering (SP)"; m[nitems].value = GameCfg.ClassicDepth; nitems++;
+	opt_gr_classicdepth = -1; // hidden from the menu (setting kept in descent.cfg)
 	opt_gr_custommodels = nitems;
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text="3D Models"; m[nitems].value = GameCfg.UseCustomModels; nitems++;
 	opt_gr_customtextures = nitems;
@@ -2110,8 +2120,7 @@ void graphics_config()
 	opt_gr_fpsindi = nitems;
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text="FPS Counter"; m[nitems].value = GameCfg.FPSIndicator; nitems++;
 
-	opt_gr_disablecockpit = nitems;
-	m[nitems].type = NM_TYPE_CHECK; m[nitems].text="Disable Cockpit View"; m[nitems].value = PlayerCfg.DisableCockpit; nitems++;
+	opt_gr_disablecockpit = -1; // hidden from the menu (setting kept in the pilot file)
 #ifdef OGL
 	m[opt_gr_texfilt+GameCfg.TexFilt].value=1;
 #endif
@@ -2148,13 +2157,15 @@ void graphics_config()
 	GameCfg.MovieTexFilt = m[opt_gr_movietexfilt].value;
 	GameCfg.BriefingRobots3D = m[opt_gr_briefingrobots3d].value;
 	PlayerCfg.AlphaEffects = m[opt_gr_alphafx].value;
-	PlayerCfg.DynLightColor = m[opt_gr_dynlightcolor].value;
+	if (opt_gr_dynlightcolor >= 0)
+		PlayerCfg.DynLightColor = m[opt_gr_dynlightcolor].value;
 	// The VSync item only exists when the backend supports vsync, so only read it
 	// back in that case. opt_gr_vsync is -1 otherwise (see graphics_config).
 	if (opt_gr_vsync >= 0)
 		GameCfg.VSync = m[opt_gr_vsync].value;
 	GameCfg.Multisample = m[opt_gr_multisample].value;
-	GameCfg.ClassicDepth = m[opt_gr_classicdepth].value;
+	if (opt_gr_classicdepth >= 0)
+		GameCfg.ClassicDepth = m[opt_gr_classicdepth].value;
 	if (GameCfg.UseCustomModels != m[opt_gr_custommodels].value)
 	{
 		GameCfg.UseCustomModels = m[opt_gr_custommodels].value;
@@ -2170,7 +2181,11 @@ void graphics_config()
 #endif
 	GameCfg.GammaLevel = m[opt_gr_brightness].value;
 	GameCfg.FPSIndicator = m[opt_gr_fpsindi].value;
-	PlayerCfg.DisableCockpit = m[opt_gr_disablecockpit].value;
+	if (opt_gr_disablecockpit >= 0)
+		PlayerCfg.DisableCockpit = m[opt_gr_disablecockpit].value;
+#ifdef OGL
+	GameCfg.FOV = 90 + 2 * m[opt_gr_fov].value;
+#endif
 
 
 	PlayerCfg.maxFps=atoi(framerate_string);

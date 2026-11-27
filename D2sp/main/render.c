@@ -51,6 +51,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "timer.h"
 #include "effects.h"
 #include "playsave.h"
+#include "config.h"
 #ifdef OGL
 #include "ogl_init.h"
 #endif
@@ -91,6 +92,18 @@ vms_vector Viewer_eye;  //valid during render
 int	N_render_segs;
 
 fix Render_zoom = 0x9000;					//the player's zoom factor
+
+// Horizontal FOV (Graphics menu) -> zoom, the same math as the raytracer: vertical FOV from the
+// horizontal one and the screen's shape, zoom = tan(vertical / 2). 90 at 16:9 = stock 0x9000.
+static fix render_fov_zoom(void)
+{
+	float aspect = 16.0f / 9.0f, h, v;
+	if (grd_curscreen && grd_curscreen->sc_w > 0 && grd_curscreen->sc_h > 0)
+		aspect = (float)grd_curscreen->sc_w / (float)grd_curscreen->sc_h;
+	h = (float)GameCfg.FOV * 3.14159265f / 180.0f;
+	v = 2.0f * atanf(tanf(h * 0.5f) / aspect);
+	return fl2f(tanf(v * 0.5f));
+}
 
 #ifndef NDEBUG
 ubyte object_rendered[MAX_OBJECTS];
@@ -1642,6 +1655,8 @@ void render_frame(fix eye_offset, int window_num)
 
 	if (start_seg_num==-1)
 		start_seg_num = Viewer->segnum;
+
+	Render_zoom = render_fov_zoom();
 
 	if (Rear_view && (Viewer==get_player_view_object())) {
 		vms_matrix headm,viewm;
