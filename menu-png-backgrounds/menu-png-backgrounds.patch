@@ -1,0 +1,332 @@
+--- a/d1/main/newmenu.c
++++ b/d1/main/newmenu.c
+@@ -22,6 +22,7 @@
+ #include <string.h>
+ #include <stdarg.h>
+ #include <ctype.h>
++#include <math.h>
+ 
+ #include "pstypes.h"
+ #include "dxxerror.h"
+@@ -134,6 +135,72 @@
+ #define MENU_BACKGROUND_BITMAP_LORES (PHYSFSX_exists("scores.pcx",1)?"scores.pcx":"scoresb.pcx")
+ #define MENU_BACKGROUND_BITMAP (HIRESMODE?MENU_BACKGROUND_BITMAP_HIRES:MENU_BACKGROUND_BITMAP_LORES)
+ 
++#ifdef RT_DX12
++// Optional full-colour replacement for the menu frame background: put
++// scoresb.png (high-res) or scores.png in the game folder. Shown as-is, without
++// the 256-colour palette remap the PCX goes through. Either name is used if the
++// preferred one is missing; with neither, the original PCX is used.
++static char *nm_background_png(void)
++{
++	char *first = HIRESMODE ? "scoresb.png" : "scores.png";
++	char *second = HIRESMODE ? "scores.png" : "scoresb.png";
++	if (PHYSFSX_exists(first, 1))
++		return first;
++	if (PHYSFSX_exists(second, 1))
++		return second;
++	return NULL;
++}
++
++// Optional per-shape frame backgrounds. Menus come in very different shapes,
++// so instead of cropping one big image, each menu box is filled with the
++// variant whose shape (width/height) is closest, stretched to fit. Any subset
++// may be present; with none, the single background above is used.
++static const char *const nm_variant_names[] = {
++	"scoresb-tall.png", "scoresb-square.png", "scoresb-std.png", "scoresb-wide.png", "scoresb-strip.png"
++};
++#define NM_VARIANT_COUNT (sizeof(nm_variant_names) / sizeof(nm_variant_names[0]))
++static grs_bitmap nm_variants[NM_VARIANT_COUNT];
++static int nm_variants_loaded = 0;
++static int nm_variant_count = 0;
++
++static grs_bitmap *nm_pick_variant(int w, int h)
++{
++	int i, best = -1;
++	float best_diff = 0.0f;
++	if (!nm_variants_loaded)
++	{
++		ubyte palette[768];
++		nm_variants_loaded = 1;
++		for (i = 0; i < (int)NM_VARIANT_COUNT; i++)
++		{
++			gr_init_bitmap_data(&nm_variants[i]);
++			if (!PHYSFSX_exists(nm_variant_names[i], 1) ||
++				pcx_read_bitmap((char *)nm_variant_names[i], &nm_variants[i], BM_LINEAR, palette) != PCX_ERROR_NONE)
++				gr_init_bitmap_data(&nm_variants[i]);
++			else
++				nm_variant_count++;
++		}
++	}
++	if (nm_variant_count == 0 || w <= 0 || h <= 0)
++		return NULL;
++	for (i = 0; i < (int)NM_VARIANT_COUNT; i++)
++	{
++		if (!nm_variants[i].bm_data || nm_variants[i].bm_h <= 0)
++			continue;
++		{
++			// Compare shapes on a log scale so 2:1 vs 1:1 counts the same as 1:1 vs 1:2.
++			const float diff = (float)fabs(log(((double)w / h) / ((double)nm_variants[i].bm_w / nm_variants[i].bm_h)));
++			if (best < 0 || diff < best_diff)
++			{
++				best = i;
++				best_diff = diff;
++			}
++		}
++	}
++	return best >= 0 ? &nm_variants[best] : NULL;
++}
++#endif
++
+ // Draws the frame background for menus
+ void nm_draw_background(int x1, int y1, int x2, int y2 )
+ {
+@@ -144,12 +211,25 @@
+ 	if (nm_background.bm_data == NULL)
+ 	{
+ 		int pcx_error;
++		int loaded_png = 0;
+ 		ubyte background_palette[768];
+ 		gr_init_bitmap_data (&nm_background);
+-		pcx_error = pcx_read_bitmap(MENU_BACKGROUND_BITMAP,&nm_background,BM_LINEAR,background_palette);
+-		Assert(pcx_error == PCX_ERROR_NONE);
+-		(void)pcx_error;
+-		gr_remap_bitmap_good( &nm_background, background_palette, -1, -1 );
++#ifdef RT_DX12
++		{
++			char *png = nm_background_png();
++			if (png && pcx_read_bitmap(png, &nm_background, BM_LINEAR, background_palette) == PCX_ERROR_NONE)
++				loaded_png = 1;	// full colour (BM_RGBA8): no palette remap
++			else
++				gr_init_bitmap_data (&nm_background);
++		}
++#endif
++		if (!loaded_png)
++		{
++			pcx_error = pcx_read_bitmap(MENU_BACKGROUND_BITMAP,&nm_background,BM_LINEAR,background_palette);
++			Assert(pcx_error == PCX_ERROR_NONE);
++			(void)pcx_error;
++			gr_remap_bitmap_good( &nm_background, background_palette, -1, -1 );
++		}
+ 		BGScaleX=((float)SWIDTH/nm_background.bm_w);
+ 		BGScaleY=((float)SHEIGHT/nm_background.bm_h);
+ 		init_sub=1;
+@@ -171,6 +251,14 @@
+ 	gr_set_current_canvas(tmp);
+ 	gr_palette_load( gr_palette );
+ 
++#ifdef RT_DX12
++	{
++		grs_bitmap *variant = nm_pick_variant(w, h);
++		if (variant)
++			show_fullscr(variant); // stretched to fill this menu box
++		else
++#endif
++	{
+ 	show_fullscr( &nm_background ); // show so we load all necessary data for the sub-bitmap
+ 	if (!init_sub && ((nm_background_sub->bm_w != w*(((float) nm_background.bm_w)/SWIDTH)) || (nm_background_sub->bm_h != h*(((float) nm_background.bm_h)/SHEIGHT))))
+ 	{
+@@ -181,6 +269,10 @@
+ 	if (init_sub)
+ 		nm_background_sub = gr_create_sub_bitmap(&nm_background,0,0,w*(((float) nm_background.bm_w)/SWIDTH),h*(((float) nm_background.bm_h)/SHEIGHT));
+ 	show_fullscr( nm_background_sub );
++	}
++#ifdef RT_DX12
++	}
++#endif
+ 
+ 	gr_set_current_canvas(old);
+ 	gr_free_sub_canvas(tmp);
+--- a/d1/2d/pcx.c
++++ b/d1/2d/pcx.c
+@@ -194,7 +194,23 @@
+ 	{
+ 		RT_ArenaMemoryScope(&g_thread_arena)
+ 		{
+-			RT_Image image = RT_LoadImageFromDisk(&g_thread_arena, filename, 4, true);
++			// Read through PhysFS first so PNGs inside .dxa packs load too, then
++			// fall back to a plain file on disk.
++			RT_Image image = {0};
++			PHYSFS_file *png_file = PHYSFSX_openReadBuffered(filename);
++			if (png_file)
++			{
++				PHYSFS_sint64 png_size = PHYSFS_fileLength(png_file);
++				if (png_size > 0 && png_size < 512 * 1024 * 1024)
++				{
++					void *png_data = RT_ArenaAlloc(&g_thread_arena, (size_t)png_size, 16);
++					if (PHYSFS_read(png_file, png_data, 1, (PHYSFS_uint32)png_size) == png_size)
++						image = RT_LoadImageFromMemory(&g_thread_arena, png_data, (size_t)png_size, 4, true);
++				}
++				PHYSFS_close(png_file);
++			}
++			if (!image.pixels)
++				image = RT_LoadImageFromDisk(&g_thread_arena, filename, 4, true);
+ 
+ 			if (!image.pixels)
+ 				return PCX_ERROR_OPENING;
+--- a/d2/main/newmenu.c
++++ b/d2/main/newmenu.c
+@@ -22,6 +22,7 @@
+ #include <string.h>
+ #include <stdarg.h>
+ #include <ctype.h>
++#include <math.h>
+ 
+ #include "pstypes.h"
+ #include "dxxerror.h"
+@@ -139,6 +140,72 @@
+ #define MENU_BACKGROUND_BITMAP_LORES (PHYSFSX_exists("scores.pcx",1)?"scores.pcx":"scoresb.pcx")
+ #define MENU_BACKGROUND_BITMAP (HIRESMODE?MENU_BACKGROUND_BITMAP_HIRES:MENU_BACKGROUND_BITMAP_LORES)
+ 
++#ifdef RT_DX12
++// Optional full-colour replacement for the menu frame background: put
++// scoresb.png (high-res) or scores.png in the game folder. Shown as-is, without
++// the 256-colour palette remap the PCX goes through. Either name is used if the
++// preferred one is missing; with neither, the original PCX is used.
++static char *nm_background_png(void)
++{
++	char *first = HIRESMODE ? "scoresb.png" : "scores.png";
++	char *second = HIRESMODE ? "scores.png" : "scoresb.png";
++	if (PHYSFSX_exists(first, 1))
++		return first;
++	if (PHYSFSX_exists(second, 1))
++		return second;
++	return NULL;
++}
++
++// Optional per-shape frame backgrounds. Menus come in very different shapes,
++// so instead of cropping one big image, each menu box is filled with the
++// variant whose shape (width/height) is closest, stretched to fit. Any subset
++// may be present; with none, the single background above is used.
++static const char *const nm_variant_names[] = {
++	"scoresb-tall.png", "scoresb-square.png", "scoresb-std.png", "scoresb-wide.png", "scoresb-strip.png"
++};
++#define NM_VARIANT_COUNT (sizeof(nm_variant_names) / sizeof(nm_variant_names[0]))
++static grs_bitmap nm_variants[NM_VARIANT_COUNT];
++static int nm_variants_loaded = 0;
++static int nm_variant_count = 0;
++
++static grs_bitmap *nm_pick_variant(int w, int h)
++{
++	int i, best = -1;
++	float best_diff = 0.0f;
++	if (!nm_variants_loaded)
++	{
++		ubyte palette[768];
++		nm_variants_loaded = 1;
++		for (i = 0; i < (int)NM_VARIANT_COUNT; i++)
++		{
++			gr_init_bitmap_data(&nm_variants[i]);
++			if (!PHYSFSX_exists(nm_variant_names[i], 1) ||
++				pcx_read_bitmap((char *)nm_variant_names[i], &nm_variants[i], BM_LINEAR, palette) != PCX_ERROR_NONE)
++				gr_init_bitmap_data(&nm_variants[i]);
++			else
++				nm_variant_count++;
++		}
++	}
++	if (nm_variant_count == 0 || w <= 0 || h <= 0)
++		return NULL;
++	for (i = 0; i < (int)NM_VARIANT_COUNT; i++)
++	{
++		if (!nm_variants[i].bm_data || nm_variants[i].bm_h <= 0)
++			continue;
++		{
++			// Compare shapes on a log scale so 2:1 vs 1:1 counts the same as 1:1 vs 1:2.
++			const float diff = (float)fabs(log(((double)w / h) / ((double)nm_variants[i].bm_w / nm_variants[i].bm_h)));
++			if (best < 0 || diff < best_diff)
++			{
++				best = i;
++				best_diff = diff;
++			}
++		}
++	}
++	return best >= 0 ? &nm_variants[best] : NULL;
++}
++#endif
++
+ // Draws the frame background for menus
+ void nm_draw_background(int x1, int y1, int x2, int y2 )
+ {
+@@ -149,12 +216,25 @@
+ 	if (nm_background.bm_data == NULL)
+ 	{
+ 		int pcx_error;
++		int loaded_png = 0;
+ 		ubyte background_palette[768];
+ 		gr_init_bitmap_data (&nm_background);
+-		pcx_error = pcx_read_bitmap(MENU_BACKGROUND_BITMAP,&nm_background,BM_LINEAR,background_palette);
+-		Assert(pcx_error == PCX_ERROR_NONE);
+-		(void)pcx_error;
+-		gr_remap_bitmap_good( &nm_background, background_palette, -1, -1 );
++#ifdef RT_DX12
++		{
++			char *png = nm_background_png();
++			if (png && pcx_read_bitmap(png, &nm_background, BM_LINEAR, background_palette) == PCX_ERROR_NONE)
++				loaded_png = 1;	// full colour (BM_RGBA8): no palette remap
++			else
++				gr_init_bitmap_data (&nm_background);
++		}
++#endif
++		if (!loaded_png)
++		{
++			pcx_error = pcx_read_bitmap(MENU_BACKGROUND_BITMAP,&nm_background,BM_LINEAR,background_palette);
++			Assert(pcx_error == PCX_ERROR_NONE);
++			(void)pcx_error;
++			gr_remap_bitmap_good( &nm_background, background_palette, -1, -1 );
++		}
+ 		BGScaleX=((float)SWIDTH/nm_background.bm_w);
+ 		BGScaleY=((float)SHEIGHT/nm_background.bm_h);
+ 		init_sub=1;
+@@ -176,6 +256,14 @@
+ 	gr_set_current_canvas(tmp);
+ 	gr_palette_load( gr_palette );
+ 
++#ifdef RT_DX12
++	{
++		grs_bitmap *variant = nm_pick_variant(w, h);
++		if (variant)
++			show_fullscr(variant); // stretched to fill this menu box
++		else
++#endif
++	{
+ 	show_fullscr( &nm_background ); // show so we load all necessary data for the sub-bitmap
+ 	if (!init_sub && ((nm_background_sub->bm_w != w*(((float) nm_background.bm_w)/SWIDTH)) || (nm_background_sub->bm_h != h*(((float) nm_background.bm_h)/SHEIGHT))))
+ 	{
+@@ -186,6 +274,10 @@
+ 	if (init_sub)
+ 		nm_background_sub = gr_create_sub_bitmap(&nm_background,0,0,w*(((float) nm_background.bm_w)/SWIDTH),h*(((float) nm_background.bm_h)/SHEIGHT));
+ 	show_fullscr( nm_background_sub );
++	}
++#ifdef RT_DX12
++	}
++#endif
+ 
+ 	gr_set_current_canvas(old);
+ 	gr_free_sub_canvas(tmp);
+--- a/d2/2d/pcx.c
++++ b/d2/2d/pcx.c
+@@ -117,7 +117,23 @@
+ 	{
+ 		RT_ArenaMemoryScope(&g_thread_arena)
+ 		{
+-			RT_Image image = RT_LoadImageFromDisk(&g_thread_arena, filename, 4, true);
++			// Read through PhysFS first so PNGs inside .dxa packs load too, then
++			// fall back to a plain file on disk.
++			RT_Image image = {0};
++			PHYSFS_file *png_file = PHYSFSX_openReadBuffered(filename);
++			if (png_file)
++			{
++				PHYSFS_sint64 png_size = PHYSFS_fileLength(png_file);
++				if (png_size > 0 && png_size < 512 * 1024 * 1024)
++				{
++					void *png_data = RT_ArenaAlloc(&g_thread_arena, (size_t)png_size, 16);
++					if (PHYSFS_read(png_file, png_data, 1, (PHYSFS_uint32)png_size) == png_size)
++						image = RT_LoadImageFromMemory(&g_thread_arena, png_data, (size_t)png_size, 4, true);
++				}
++				PHYSFS_close(png_file);
++			}
++			if (!image.pixels)
++				image = RT_LoadImageFromDisk(&g_thread_arena, filename, 4, true);
+ 
+ 			if (!image.pixels)
+ 				return PCX_ERROR_OPENING;

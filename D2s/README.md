@@ -1,0 +1,240 @@
+# D2X-Redux SLikeNet: Update News
+
+## Multiplayer
+
+- **Faster, steadier netcode.** In-game traffic now runs over SLikeNet for ship positions and combat actions. Lobby, joining, discovery and observers share the same single port (42424 by default), so there is nothing extra to open.
+- **Real delivery modes.** Late or out-of-order position packets are dropped and the newest wins. Important game data is delivered reliably and in order, and the rest stays unreliable. The acknowledgement counter is now 32-bit, so long games don't wrap it.
+- **Up to 90 packets per second.** The Packets Per Second setting (10-90) now holds its target even when frames run late.
+- **Up to 360 FPS.** Higher frame rates are supported, with smoothing so motion stays fluid between network updates.
+- **Better NAT behavior.** Joiners connect out to lower-numbered players and the host. Observers connect to the host only. Each connection is set up with a token-checked handshake.
+- **Link Status In Everyone's Chat**
+Each player's SLikeNet link results show on their HUD and in every player's chat, starting with "SLikeNet Link Success: name" when a link comes up.
+- **Link Failure Reasons**
+"Link Failure:name reason" says why a link didn't come up: no dial, no reply, no hello, full or no lane. Traffic with that player uses plain UDP.
+- **Link Drop Warning**
+"Peer Link Dropped:name" shows when a working link goes down mid-game while that player is still in it.
+- **Clear failure if the port is busy.** SLikeNet retries the port 10 times, 50 ms apart. If it still can't bind, hosting or joining fails instead of quietly running without it.
+- **Pausing is safe.** Nobody is dropped for going quiet. A host or player sitting in a menu, paused or inactive stays in the game for as long as they like. A player whose reliable-packet queue fills up without ever acknowledging can still be dropped.
+- **Smoother ships.** Other players' ships are drawn between two real updates, with nothing guessed, about 1.5 packet intervals behind (16.7 ms at 90 PPS; co-op timing uses 60 PPS). The smoothing is applied again after physics each frame. They won't glide through walls or closed doors, and a ship crossing a segment border no longer snaps ahead.
+- **Robots in co-op.** Robots controlled by another player move only by network updates, sent 20 times per second, with no local drift, wobble or added delay. A robot in its death roll keeps its local tumble. Robot AI also behaves more consistently between players.
+- **Short Packets always on.** Observers need it to link over SLikeNet, so there is no menu item, and a saved game profile can't turn it off.
+- **Anti-cheat.** Only the original Descent data files (checked by HAM hash) are allowed online. Unsupported files stop you hosting or joining.
+- **Crash fix.** Leaving a game and rejoining manually no longer crashes.
+- **Version bump.** Multiplayer protocol 30006. Older builds can't join games from this version.
+- **Rejoining Players Link Again**
+A player who rejoins into a lower player slot gets a SLikeNet link to every player again, instead of staying on plain UDP with the higher-numbered ones.
+- **Separate Game, Host And Join Ports**
+-udp_gameport is the port the LAN game list searches on and Join Manually's game port, -udp_hostport is the port you host on, and -udp_myport is the port you join from. All default to 42424.
+- **Join Manually Remembers Game Port**
+A game port you type in Join Manually is saved and used again next time, including for the LAN game list.
+- **Host Can Change Map**
+The host can press Esc, pick Change Map, then a mission and starting level. Everyone goes straight to Prepare for Descent on the new map, with scores reset and the same game settings.
+- **Menus Keep The Game Smooth**
+In a multiplayer game the Esc menu and other screens no longer slow the game down, so the host keeps sending and relaying updates at full rate and observers see smooth movement.
+- **Co-op Start Points**
+In co-op every player starts on their own spot. Levels without co-op starts use their other player starts, so ships no longer stack on the first start.
+- **No Plain UDP Fallback**
+Ship positions and game messages only travel over SLikeNet. A player whose link to the host fails or drops is removed after 5 seconds. Joining, game lists and observers still use plain UDP.
+- **Click To Join**
+In Enter Game Address, a left click works like Enter.
+- **SLikeNet Handshake Sound**
+Your "SLikeNet Peer Link Success" line shows 2 seconds after a player appears and plays its own sound, slikenetmsg.wav. The chat line telling everyone else follows at 3 seconds with the same sound, and observer chat uses it too. No Player Chat Sound mutes it.
+- **New Sound for SLikeNet Peer Link and Chat Message sends at 2 and 3 seconds**
+Your "SLikeNet Peer Link Success" line plays slikenetmsg.wav 2 seconds after a player appears, and the chat line for everyone follows at 3 seconds with the same sound.
+
+## Running several copies on one PC
+
+- **`proxy.cfg`.** Put a file named `proxy.cfg` next to the game with one line, `bind_ip=127.0.0.2`. That copy binds its game and broadcast sockets to that address instead of all addresses. An invalid address shows a red warning and falls back to all addresses.
+- **One port for all.** Give each copy its own address (`127.0.0.2`, `127.0.0.3`, ...) and they can all use port 42424.
+- **No background slowdown.** Windows 11 no longer slows down a game window sitting behind another one.
+- **Link Failure Test Switch**
+Start a copy with -slikenet_nolink and it refuses every SLikeNet link while still playing over plain UDP, so the other players see Link Failure with a reason. Failures can't happen between copies on one PC otherwise.
+
+## Observers
+
+- **Own controls.** Observers get their own custom controls.
+- **Wall-aware camera.** The free-fly camera no longer passes through walls behind the ship.
+- **Steady follow.** The camera updates after the network and physics step and follows the observed ship rigidly, with no ghosting, jitter or third-person jolt.
+- **Clean segment borders.** The first-person and free-view camera no longer jumps when crossing from one segment to the next.
+- **Fading ships.** Ships that get close to the observer camera fade out so they don't block the view.
+- **FPS counter.** The Graphics menu FPS Counter now works for observers and in observer demos.
+- **Show Observer Messages.** A new Misc option, on by default, lets non-observers see or hide observer chat. The host relays observer chat to all players.
+- **Observing host chat is blue too.** A host who is observing chats in the same all-blue style, name and text, and follows the same toggle.
+- **Centered gun sounds.** Following a ship in first person, its guns sound centered, the same as your own.
+- **Respawn sound in place.** The observed ship's respawn sound plays where it respawns, not from where it died.
+- **Observer List Above FPS**
+The OBSERVERS list and streaks sit above the FPS line in every view, live and in observer demo playback, instead of at the bottom right over the weapon rows.
+- **Observer Ping**
+Observers now get the host's ping table, so with F6 network stats and the kill list on, the kill list shows real pings instead of 0. In a normal game they are from the followed player's point of view; with Retro Protocol they are the host's ping to each player.
+
+## Demos
+
+- **Recorded at your frame rate.** Demos store about one frame per rendered frame, set by your FPS cap (up to 360). They used to be fixed at 20 frames per second, which looked choppy on fast PCs. Higher rates make bigger files.
+- **Played at your frame rate.** Playback runs in real time at whatever frame rate you are running, so speed is always correct, and blends between recorded frames.
+- **Exact camera.** Demos store the main view's exact position and orientation, and ship smoothing runs while recording, so an observer demo plays back the way it looked live.
+- **New demo format.** Demo version 16. Demos recorded by older builds no longer play.
+- **Playback HUD.** `FPS` shows your live frame rate and `DEMO` shows the rate the demo was recorded at, so you can compare. The `DEMO` readout no longer jumps around during playback and, like `FPS`, updates once a second.
+- **No seam at segment borders.** The playback view no longer pops when the camera crosses a segment.
+- **Fixes.** Afterburner states are recorded and replayed, and demo playback now plays the afterburner sound. The HUD no longer goes blank when fast-forwarding demos as an observer. Fast-forward and rewind steps scale with your FPS cap.
+- **Bomb Count In Demos**
+Prox bombs and smart mines picked up or dropped while another secondary is selected now show in playback, rewind included. Older demos still play.
+
+## HUD and options
+
+- **Speedrun timers:** RTA covers gameplay and level transitions. IGT covers gameplay only and stays visible (frozen) over the pause screen. Loading a save or using cheats turns them white. Toggle them in the Misc menu. Timer issues are fixed.
+- **"Suppress HUD Messages (SP)"** replaces "No redundant pickup messages". It hides all single-player HUD text except ammo/shield warnings and Guide-Bot.
+- **HUD messages stay longer.** A single message shows for 4.5 seconds, and stacked messages 3 seconds each (up from 3 and 2). Repeats reset to 3 seconds.
+- **Graphics toggles.** Turn custom graphics, textures and models on or off. The texture toggle now works correctly.
+- **Flash toggle.** Reduced Flash is your own Graphics menu setting. Off is off everywhere. On in multiplayer also needs the host's Reduced Flash option.
+- **Original D1 Weapons (SP).** Misc menu toggle for single-player D2.
+- **Velocity meter.** New optional readout, toggled in the Misc menu. Velocity is recorded into demos whether or not the readout is shown.
+- **Power-ups.** Fixed orientation and rotation for 3D models. Spin speeds are retuned and Quad Fire is tilted.
+- **3D Mines**
+Live smart mines (player and robot) and live proximity bombs with custom models are on, each spinning once every 1.5 seconds.
+- **Mine Pack Spin**
+The smart mine pack now spins at the same speed as the proximity bomb pack.
+- **Fixed HUD Rows**
+Full screen keeps FPS, DEMO, RTA, IGT and velocity stacked above the weapon rows, so nothing overlaps and nothing moves when you switch HUD modes. Multiplayer and multiplayer demo playback use the same layout, and Alt HUD #1 now shows the bomb count.
+- **One Gauss And Vulcan Readout**
+Alt HUD #1 shows a single G: or V: ammo line for the selected gun instead of two, and Alt HUD #2 no longer draws ammo over the laser level.
+- **Velocity Without ROT**
+The velocity meter drops the rotation readout.
+- **-notitles Works**
+Skips the intro movies, title screens and the exit order screen, like in D1.
+- **Laser Key Steps Down**
+With Laser 5 or 6, pressing the laser key while on lasers drops one level (6 to 5, or 5 to 4) and back again. Switching to lasers from another gun always picks your highest laser.
+- **Original D1 Weapons: Laser Ladder**
+Lasers 1 to 6 do 10, 10.5, 11, 11.5, 11.5 and 12.5 damage. Laser 5 fires 5% faster and Laser 6 shots fly 5% faster.
+- **Original D1 Weapons: D1 Homing**
+Homing missiles lock on at D1's wider angle, ignore enemy mines and last 20 seconds, and Megas fire every half second. On Ace and Insane, robot homing missiles, megas and smart blobs use D1's damage.
+- **Weak Gauss Push And Fireball**
+With Disable Gauss Splash on, Gauss hits give a small push and show their fireball on ships, without splash damage to anyone.
+- **Click Anywhere acts as Enter on Menus**
+In menus and file or pilot lists, a left click on empty space picks the highlighted item, like Enter. Yes/No and other message boxes still need a click on a button.
+- **Bounty Skips Observing Host**
+A new bounty target is never the host who is observing, and a leaving player is never picked as the target that replaces them.
+- **Capture The Flag: Flags Return To Base**
+A new option on the team selection screen. Touch your own dropped flag and it goes back to your goal, and after a score the new flag appears in its own goal instead of a random spot. Off keeps the original rules.
+- **960x540 Default Resolution**
+Fresh installs now start at 960x540 (16:9) instead of the old 640x480, and so does the Default answer when the game asks about a too-big resolution at startup. Your saved resolution in descent.cfg is kept as it is.
+
+## Features
+
+- **Fullscreen, Borderless And Windowed Modes**
+The Fullscreen and Borderless window boxes in Screen Resolution now give four real modes. Fullscreen alone is exclusive and keeps the mouse trapped. Fullscreen with Borderless covers your whole monitor and shows the game picture pixel for pixel in the middle, with black around it; a resolution bigger than the monitor is shrunk to fit. Borderless alone stays exactly where your window was, and a bordered window slides back on screen after a resolution change. Before, Borderless did nothing in fullscreen and a resized window could open half off the screen.
+- **24-Bit PCX Menu Backgrounds**
+Menu boxes, the main menu (menub.pcx) and the star backgrounds behind level messages now read 24-bit PCX files: millions of colours instead of 256. A 24-bit picture goes straight to the screen with no palette, so it can never change the colours of the menu text. That is what used to turn menu lettering the wrong colour after changing resolution or graphics settings. 8-bit PCX files still work and keep their own palette.
+- **Safer Resolution Changes**
+Going more than two sizes above your monitor in the list, or past 1.5 times its width or height, asks "Are you sure?" first: on a 1920x1080 screen the next two sizes up are fine and the third one asks. It then gives you 15 seconds to pick Keep before it switches back on its own. If the game is closed on one anyway, the next start opens at 960x540 and asks whether to go back to it, so nobody gets stuck on a screen they can't see.
+
+## Options
+
+- **Screen Resolution Aspect Filter**
+"use custom values" is now a checkbox. Type an aspect such as 16x9, or step through 4x3, 5x4, 16x10, 16x9 and 21x9 with the arrow keys, press Enter, and the list shows only that shape. Typing a width fills in the height for that shape (555 becomes 555x312), typing past the x fills in the width, and with 0x0 the aspect follows whatever you type. The last 2 custom resolutions you applied stay in the list until you untick the box, and it is all saved in descent.cfg.
+- **More Resolutions In The List**
+960x540 and 854x480 (16:9) and the 16:10 sizes 1024x640, 1152x720, 1280x800, 1440x900 and 1680x1050 are now in the Screen Resolution list, so they are easy to pick. The list is sorted by size, biggest first, like your monitor's own list.
+- **Resolution Box Works Like A Text Box**
+The resolution box has a normal cursor: Left and Right move it, Home and End jump to either end, Backspace deletes before the cursor and Delete after it. Right at the end steps to the next bigger resolution of the current shape, and Left at the start to the next smaller one.
+- **Enter On Fullscreen And Borderless**
+Space ticks the boxes as before. Enter on a ticked box applies the window mode straight away, Enter on an empty box does nothing, and a quick double Enter ticks it and applies it.
+
+## DXA Graphics
+
+- **Multiple New HD Title Screens for D2 in XDHDTITLES.DXA**
+XDHDTITLES.DXA has several new high-resolution title screens.
+
+- **XTEXTURESD2.DXA Without Old Menu Art**
+The old 8-bit menu, logo and menu box pictures are gone from XTEXTURESD2.DXA. They were covering the HD versions in XDHDTITLES.DXA, so the HD menus now show. Download the new XTEXTURESD2.DXA from the Models-n-Textures pack.
+
+## BugFixes
+
+- **No ship flash before respawn** 
+A dead player's ship no longer shows briefly at the spot they died just before they spawn.
+- **No Stray Shots from the death spot**
+ Pressing fire to respawn no longer makes a shot appear where you died.
+- **No Flares While Dead** 
+With Preview spawn, a dead player can no longer launch a flare from where they died.
+- **Position Updates go out Sooner** 
+Ship positions are sent right away instead of waiting up to 10 ms. Positions stuck in the send queue for over 100 ms are dropped instead of arriving late in a burst.
+- **Network Clock Fix**
+The network clock no longer loses up to one frame every 65 seconds.
+- **Quieter -debug console** 
+The per-packet **Packet OUT** and **Packet IN** lines are off. The traffic summary lines stay.
+- **Velocity clear of FPS** 
+In the death camera's letterbox view the velocity meter sits in the bottom bar instead of on top of the FPS line.
+- **F3 in Demo Playback** 
+F3 cycles the cockpit views during normal demo playback again.
+- **HUD Modes in Demos** 
+Alt+F7 now cycles the HUD modes during demo playback too, and the demo F1 screen lists it.
+- **Cruise Survives Respawn** 
+Die with cruise control on and you respawn with it still on, at the same speed.
+- **Last Input Wins** 
+New Controls option under Sticky Rearview, off by default. With both opposite slide or bank directions held, the one pressed last moves the ship instead of the two cancelling out.
+- **FRAMETIME** 
+Toggles the FPS counter. Type it in game or during demo playback. 
+- **Shield Orb Tilt**
+ The 3D shield orb now spins at a 44-degree tilt.
+- **No Developer Cheats**
+ Builds are Release only, so the Delete+key test keys and the Delete+C cheat menu can no longer be used.
+- **Trap Cheat Codes Removed**
+The leftover trap codes removed. The shipped single-player cheats still work, and no cheat works in multiplayer.
+- **Smart Mine Pack Comes Back**
+Lay some of a smart mine pack and die holding the rest, and a full pack drops where you died, in co-op too. Mines laid in an earlier level no longer count toward the next one.
+- **Your Mines Stay Put**
+Your own smart mines and proximity bombs no longer set each other off when laid close together. 
+- **Cheat Codes Work Again**
+Typed single-player cheat codes work again. The frametime check was eating every typed letter before the cheat check saw it.
+- **Red Version Text**
+The version line on the title screen is red again, the same red as DEMO RECORDING, instead of orange.
+- **Autoselect Once Switches When Dry**
+With Autoselect only once on, running out of missiles and dropping to smart mines no longer blocks the switch to a missile you pick up.
+- **No Popup For Missing D1 Files**
+Hosting or playing a D1 map without descent.hog or descent.pig no longer opens a warning window. The note goes to gamelog.txt and the game carries on.
+- **Bad Packets Can't Corrupt Memory**
+Network messages with an impossible player number are ignored instead of writing outside the game's player lists.
+- **Failed Joins Clear Themselves**
+A player who starts joining but never arrives (wrong level file, crash, closed game) is removed for everyone after 20 seconds, so they don't stay listed and the next player can join.
+- **No Crash On Exit**
+Closing the game no longer crashes in OpenGL, so the last gamelog lines are kept.
+- **Right Names In The Memlog**
+Closing the game window after leaving no longer writes a second memlog with your own name in place of the host's.
+- **Robot Messages Checked**
+Robot messages with an impossible robot type, gun or segment are ignored, and a full object list no longer breaks robot respawns.
+- **No Crash On Rejoin**
+Leaving a game and rejoining right away no longer crashes while the game waits for the host's settings.
+- **Observer Stays Listed**
+An observer stays on the HUD list, shown once, across map changes, gets every packet once, and can rejoin without "game is full".
+- **Robot Drops Land Together**
+Items a robot drops start out the same on every screen, so they land in the same place for everyone.
+- **Observer Ignores Blasts**
+Explosions no longer push or damage the observer's camera.
+- **Observer Sees Death Rolls**
+Robots that tumble when they die now tumble and explode for observers too.
+- **Thief In Sync**
+Only the player controlling the Thief moves it and everyone else follows, so it is in the same place on every screen and no longer teleports.
+- **Joiners See The Level As It Is**
+Players and observers who join see force fields, used switches and smashed lights the way they are in the game, not the way the level started.
+- **Open Doors Can Be Flown Through**
+A door that looks open is open on every screen; someone joining no longer turns open doors solid.
+- **Unlocked Doors For Joiners**
+Doors a switch has unlocked can be opened by players who join later.
+- **No Weapon Crash After Loading**
+Loading a co-op save no longer crashes with "Secondary Weapon is not in order list". Everyone keeps the weapons they had selected.
+- **Crashed Players Removed**
+A player whose game crashed or was closed is removed for everyone about 10 to 15 seconds later, so observers can't watch them and their slot frees up.
+- **Backing Out Of A Join**
+A player who backs out of the waiting box while joining is taken out at once, so nobody keeps sending to them.
+- **Observers See Joins**
+Observers now see players who join or rejoin while they watch, and a game that switches from observing to playing no longer stays on the observer list.
+- **Bounty Mode Endless Loop**
+Picking a new bounty target can no longer hang the game when there is no player left to pick.
+- **Game Stops Grabbing The Mouse**
+In windowed and borderless modes, clicking off the game or alt-tabbing now lets the mouse go straight away, and the game only takes it back when you click on it. It no longer pulls the cursor back while you use another window or monitor, and hovering over the game doesn't turn your ship. "Keep Keyboard/Mouse focus" only holds the cursor while you are playing, never in menus or after Esc.
+- **Enter In Screen Resolution Keeps You In The Menu**
+Pressing Enter on a resolution used to change it and throw you out of the menu straight away. Now the menu stays open: Enter ticks a resolution, and only Enter on the one already ticked changes it.
+- **Mouse Clicks On Resolutions**
+Clicking a resolution ticks it without changing your screen, and clicking the ticked one again applies it, so a stray click can't switch resolutions on you.
+- **Screen Sharing Fullscreen Borderless**
+Discord and OBS screen capture no longer freeze on one frame in Fullscreen Borderless. Windows took the monitor-sized window for real fullscreen and skipped the desktop that capture reads from, so the window is now one pixel taller than the screen.
+- **Briefing Hum Without Music**
+The briefing hum only played when no song was playing at all, so it almost never did. It now plays whenever the music volume is 0 or no music is playing, two FX steps below your other sounds, and stays off while music plays.

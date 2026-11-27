@@ -1,0 +1,20 @@
+name: Zip notify
+on:
+  push:
+    branches: [D2-SlikeNet-WorkBranch]
+    paths: ['download/D2x-Redux-SLikeNet.zip', 'download/D2x-Models-Textures.zip']
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          ZIP_URL: https://github.com/${{ github.repository }}/raw/${{ github.ref_name }}/download/D2x-Redux-SLikeNet.zip
+          MODELS_URL: https://github.com/${{ github.repository }}/raw/${{ github.ref_name }}/download/D2x-Models-Textures.zip
+        run: |
+          # The D2x release post (F7 pushes D1, then D2; each game posts its own): .github/zip-notes.py
+          msg=$(python3 .github/zip-notes.py D2 "$ZIP_URL" "$MODELS_URL")
+          jq -n --arg c "$msg" '{content: $c, username: "D2x-SLikeNet", flags: 4}' | curl -sf -H "Content-Type: application/json" -d @- "$WEBHOOK"
