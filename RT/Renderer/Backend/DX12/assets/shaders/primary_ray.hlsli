@@ -336,6 +336,7 @@ void GetHitGeometryFromRay(RayDesc ray,
                 OUT.metallic  = tweak.override_metallic;
                 OUT.roughness = tweak.override_roughness;
             }
+            OUT.roughness = max(OUT.roughness * tweak.roughness_scale, 0.02f); // Roughness (renderer value x pilot %)
 
             // Increase the roughness of secondary bounces to combat fireflies
             // ad-hoc implementation, TODO: learn about path space regularization

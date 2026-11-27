@@ -48,11 +48,11 @@ void CompositeCS(COMPUTE_ARGS)
 	if (tweak.svgf_enabled)
 	{
 		float3 reflectivity = lerp(0.04, 0.01 + albedo, metallic);
-		composite_color = albedo*diff + reflectivity*spec + emissive;
+		composite_color = albedo*diff + reflectivity*spec*tweak.specular_scale + emissive;
 	}
 	else
 	{
-		composite_color = albedo*diff + spec + emissive;
+		composite_color = albedo*diff + spec*tweak.specular_scale + emissive;
 	}
 
 	float3 out_color = composite_color;

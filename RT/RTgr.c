@@ -1,6 +1,7 @@
 #include "gr.h"
 #include "internal.h"
 #include "RTgr.h"
+#include "strutil.h"
 #include "u_mem.h"
 #include "config.h"
 #include "args.h"
@@ -424,11 +425,24 @@ void gr_palette_read(ubyte* pal)
 	}
 }
 
-int screen_flash_mul = 1;
+// FOV is the renderer's "fov" setting (Raytracing Options and the renderer window share it).
+static float RT_PilotFov(float fov) { return fov; }
+
+// Flash screen multiplier (Ingame Tools > Miscellaneous). Kept in the render settings as
+// "screen_flash_mul", so it is saved with render_settings.vars and the render profile.
+static int RT_ScreenFlashMul(void)
+{
+	RT_RendererIO *io = RT_GetRendererIO();
+	int mul = 1;
+	if (io && io->config)
+		RT_ConfigReadInt(io->config, RT_StringLiteral("screen_flash_mul"), &mul);
+	return RT_CLAMP(mul, 0, 100); // 0 = no screen flash
+}
 
 void gr_palette_step_up(int r, int g, int b)
 {
 	RT_Vec4 screen_flash_color = { 0, 0, 0, 1 };
+	int screen_flash_mul = RT_ScreenFlashMul();
 
 	r = r * screen_flash_mul;
 	g = g * screen_flash_mul;
@@ -642,12 +656,13 @@ int gr_init(int mode)
 
 	igInitWin32(info.window);
 	RT_RendererInit(&initParams);
+	snprintf(RT_GetRendererIO()->active_profile, sizeof(RT_GetRendererIO()->active_profile), "%s", GameCfg.RenderProfile);
 
 	float horizontal_fov;
 	RT_ConfigReadFloat(RT_GetRendererIO()->config, RT_StringLiteral("fov"), &horizontal_fov);
 	horizontal_fov = RT_CLAMP(horizontal_fov, 90.0f, 120.0f);
 	RT_ConfigWriteFloat(RT_GetRendererIO()->config, RT_StringLiteral("fov"), horizontal_fov);
-	g_cam.vfov = g_free_cam.vfov = RT_HorizontalToVerticalFov(horizontal_fov);
+	g_cam.vfov = g_free_cam.vfov = RT_HorizontalToVerticalFov(RT_PilotFov(horizontal_fov));
 
 	// Awkward place to do this, but I need to do it somewhere
 	memcpy(&g_rt_default_dynamic_light_info, &g_rt_dynamic_light_info, sizeof(g_rt_dynamic_light_info));
@@ -1481,7 +1496,12 @@ static void RT_DoDynamicLightEditorMenus(void)
 
 		if (igButton("Save Settings", (ImVec2){0, 0}))
 		{
+			igOpenPopup_Str("SaveDynamicLightsTo", 0);
+		}
+		if (RT_LightsSaveToProfilePopup("SaveDynamicLightsTo"))
+		{
 			RT_SaveDynamicLightSettings();
+			RT_SetLightsSaveTarget(NULL);
 		}
 
 		igSameLine(0.0f, -1.0f);
@@ -1548,7 +1568,7 @@ static RT_String RT_FormatString(RT_Arena *arena, const char *fmt, ...)
 	va_list args;
 	va_start(args, fmt);
 
-	const char *formatted = RT_ArenaPrintF(arena, fmt, args);
+	const char *formatted = RT_ArenaPrintFV(arena, fmt, args);
 
 	va_end(args);
 
@@ -1572,7 +1592,7 @@ void RT_LoadDynamicLightSettings(void)
 		RT_Config *cfg = RT_ArenaAllocStruct(&g_thread_arena, RT_Config);
 		RT_InitializeConfig(cfg, &g_thread_arena);
 
-		if (RT_DeserializeConfigFromFile(cfg, "lights/dynamic_lights.vars"))
+		if (RT_DeserializeConfigFromFile(cfg, RT_LightsLoadPath(&g_thread_arena, "dynamic_lights.vars")))
 		{
 			RT_ConfigReadInt(cfg, RT_StringLiteral("weapon_flare_lights"), &info->weaponFlareLights);
 			RT_ConfigReadFloat(cfg, RT_StringLiteral("weapon_brightness"), &info->weaponBrightMod);
@@ -1581,6 +1601,8 @@ void RT_LoadDynamicLightSettings(void)
 			for (size_t i = 0; i < RT_LIGHT_ADJUST_ARRAY_SIZE; i++)
 			{
 				RT_WeaponLightAdjusts *adj = &rt_light_adjusts[i];
+				if (!adj->weapon_name)
+					continue;
 
 				RT_ConfigReadFloat(cfg, RT_FormatString(&g_thread_arena, "%s_brightness", adj->weapon_name), &adj->brightMul);
 				RT_ConfigReadFloat(cfg, RT_FormatString(&g_thread_arena, "%s_radius", adj->weapon_name), &adj->radiusMul);
@@ -1631,6 +1653,8 @@ void RT_SaveDynamicLightSettings(void)
 		for (size_t i = 0; i < RT_LIGHT_ADJUST_ARRAY_SIZE; i++)
 		{
 			RT_WeaponLightAdjusts *adj = &rt_light_adjusts[i];
+			if (!adj->weapon_name)
+				continue;
 
 			RT_ConfigWriteFloat(cfg, RT_FormatString(&g_thread_arena, "%s_brightness", adj->weapon_name), adj->brightMul);
 			RT_ConfigWriteFloat(cfg, RT_FormatString(&g_thread_arena, "%s_radius", adj->weapon_name), adj->radiusMul);
@@ -1645,7 +1669,7 @@ void RT_SaveDynamicLightSettings(void)
 		RT_ConfigWriteFloat(cfg, RT_StringLiteral("muzzle_brightness"), info->muzzleBrightMod);
 		RT_ConfigWriteFloat(cfg, RT_StringLiteral("muzzle_radius"), info->muzzleRadiusMod);
 
-		if (!RT_SerializeConfigToFile(cfg, "lights/dynamic_lights.vars"))
+		if (!RT_SerializeConfigToFile(cfg, RT_LightsSavePath(&g_thread_arena, "dynamic_lights.vars")))
 		{
 			success = false;
 		}
@@ -1668,6 +1692,26 @@ void RT_ResetDynamicLightSettings(void)
 	RT_SetSettingsNotification(&g_dynamic_lights_notification, "Reset dynamic light settings", (ImVec4){0.5f, 0.7f, 1.0f, 1.0f});
 }
 
+// Switches to a render profile's lights (lights/<profile>/, else the shared lights/ files):
+// level lights, headlights and dynamic lights are reset to defaults and reloaded, so nothing
+// from the previous profile carries over.
+void RT_SetLightsProfile(const char *render_profile)
+{
+	char before[64];
+	snprintf(before, sizeof(before), "%s", RT_LightsProfile());
+	RT_SetLightsProfileName(render_profile);
+	if (!strcmp(before, RT_LightsProfile()))
+		return;
+
+	RT_ResetLightSettings();
+	RT_LoadLightSettings();
+	RT_ResetHeadLightSettings();
+	RT_LoadHeadLightSettings();
+	RT_ResetDynamicLightSettings();
+	RT_LoadDynamicLightSettings();
+	con_printf(CON_NORMAL, "Lights profile: %s\n", RT_LightsProfile()[0] ? RT_LightsProfile() : "shared");
+}
+
 void RT_StartImGuiFrame(void)
 {
     if(GameArg.SysOpenVR) igGetIO()->ConfigFlags &= ~ImGuiConfigFlags_ViewportsEnable;
@@ -1678,13 +1722,33 @@ void RT_StartImGuiFrame(void)
     }
 	igNewFrame();
 
+	// A profile loaded from the renderer's Load preset becomes the game's Render Profile (and its lights).
+	{
+		RT_RendererIO *rio = RT_GetRendererIO();
+		if (rio->active_profile[0] && d_stricmp(rio->active_profile, GameCfg.RenderProfile))
+		{
+			snprintf(GameCfg.RenderProfile, sizeof(GameCfg.RenderProfile), "%s", rio->active_profile);
+			RT_SetLightsProfile(GameCfg.RenderProfile);
+			RT_ApplyGameLightKeys(rio->config);
+		}
+		// First frame: take the light levels saved in render_settings.vars (after the light files and
+		// defaults have loaded); from then on keep the game_* keys current, so any save carries them.
+		static bool game_light_keys_applied = false;
+		if (!game_light_keys_applied)
+		{
+			RT_ApplyGameLightKeys(rio->config);
+			game_light_keys_applied = true;
+		}
+		RT_StoreGameLightKeys(rio->config);
+	}
+
 	// NOTE(Justin): It is times like these you realize that you are under a lot of time pressure
 	// and write code like this. There is definitely a quite simple mathematical way to solve this, but whatever.
 	bool value_changed = false;
 	float horizontal_fov;
 	RT_ConfigReadFloat(RT_GetRendererIO()->config, RT_StringLiteral("fov"), &horizontal_fov);
 	horizontal_fov = RT_CLAMP(horizontal_fov, 90.0f, 120.0f);
-	float fov = RT_HorizontalToVerticalFov(horizontal_fov);
+	float fov = RT_HorizontalToVerticalFov(RT_PilotFov(horizontal_fov));
 	float fov_delta = fov - g_cam.vfov;
 	if (fov_delta != 0.0)
 	{
@@ -1765,7 +1829,15 @@ void RT_StartImGuiFrame(void)
 				igPushID_Str("Miscellaneous");
 				igIndent(0);
 
-				igSliderInt("Flash screen multiplier", &screen_flash_mul, 1, 100, "%d", 0);
+				int screen_flash_mul = RT_ScreenFlashMul();
+				if (igSliderInt("Flash screen multiplier", &screen_flash_mul, 0, 100, "%d", 0))
+					RT_ConfigWriteInt(RT_GetRendererIO()->config, RT_StringLiteral("screen_flash_mul"), screen_flash_mul);
+				if (igIsItemDeactivatedAfterEdit()) // saved to the current settings and the active profile
+				{
+					RT_SerializeConfigToFile(RT_GetRendererIO()->config, "render_settings.vars");
+					if (GameCfg.RenderProfile[0])
+						RT_SerializeConfigToFile(RT_GetRendererIO()->config, RT_ArenaPrintF(&g_thread_arena, "assets/render_presets/%s", GameCfg.RenderProfile));
+				}
 
 				igPopID();
 				igUnindent(0);

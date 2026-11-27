@@ -54,8 +54,17 @@ static void event_apply_grab(void)
 	// is locked again as soon as the game window gets focus back.
 	if (RT_VRActive() && focus_wanted)
 		grab = 1;
+	// The raytracer debug menus (Shift+Alt+F1) need a free mouse.
+	if (g_rt_enable_debug_menu)
+		grab = 0;
 #endif
 	SDL_WM_GrabInput(grab ? SDL_GRAB_ON : SDL_GRAB_OFF);
+}
+
+// Re-applies the mouse grab after something it depends on changed (e.g. the debug menus toggled).
+void event_refresh_grab(void)
+{
+	event_apply_grab();
 }
 
 #ifdef RT_DX12
@@ -252,7 +261,8 @@ void RT_Event_Poll(ImGuiIO* io, SDL_Event* ev, int* clean_uniframe, int* idle)
 			idle = 0;
 			
 			ImGuiIO_AddMousePosEvent(io, (float)event.motion.x, (float)event.motion.y);
-			if (!igIsWindowFocused(ImGuiFocusedFlags_AnyWindow))
+			// With the debug menus open the mouse belongs to the menus, not the ship.
+			if (!g_rt_enable_debug_menu && !igIsWindowFocused(ImGuiFocusedFlags_AnyWindow))
 				mouse_motion_handler((SDL_MouseMotionEvent*)&event);
 			
 			break;

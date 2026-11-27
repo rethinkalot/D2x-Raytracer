@@ -282,6 +282,14 @@ void RT_ReleaseMesh(const RT_ResourceHandle mesh_handle)
 }
 
 static uint32_t g_override_flags = 0;
+extern uint32_t g_rt_instance_mask_override; // RenderBackend.cpp
+
+uint32_t RT_RaytraceSetInstanceMaskOverride(uint32_t mask)
+{
+	uint32_t old_mask = g_rt_instance_mask_override;
+	g_rt_instance_mask_override = mask;
+	return old_mask;
+}
 
 uint32_t RT_RaytraceSetRenderFlagsOverride(uint32_t flags)
 {

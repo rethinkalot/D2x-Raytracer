@@ -34,6 +34,10 @@ typedef struct
 	float muzzleRadiusMod;
 } RT_DynamicLightInfo;
 
+// Light levels stored as game_* keys in the render settings (menu.c).
+void RT_ApplyGameLightKeys(RT_Config *config);
+void RT_StoreGameLightKeys(RT_Config *config);
+
 
 typedef struct RT_WeaponLightAdjusts
 {

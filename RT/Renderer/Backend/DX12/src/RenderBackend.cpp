@@ -31,6 +31,7 @@
 using namespace DirectX;
 
 #define RT_RENDER_SETTINGS_CONFIG_FILE "render_settings.vars"
+#define RT_FIRST_RUN_PROFILE "assets/render_presets/RTXRETHINK.vars" // keep in sync with RenderProfile default in config.c
 #define RT_DEFAULT_RENDER_SETTINGS_CONFIG_FILE "assets/render_presets/default.vars"
 
 // ------------------------------------------------------------------
@@ -58,6 +59,7 @@ uint16_t        g_rt_material_indices[RT_MAX_MATERIALS];
 RT::D3D12State RT::g_d3d;
 RT::D3D12RasterState RT::g_d3d_raster;
 RT::TweakVars RT::tweak_vars;
+uint32_t g_rt_instance_mask_override = 0; // RT_RaytraceSetInstanceMaskOverride
 
 using namespace RT;
 
@@ -399,6 +401,12 @@ namespace
 		{
 			UpdateTweakvarsFromIOConfig();
 		}
+		else if (RT_DeserializeConfigFromFile(g_d3d.io.config, RT_FIRST_RUN_PROFILE))
+		{
+			// First launch (no render_settings.vars yet): start from the shipped profile, not the built-ins.
+			UpdateTweakvarsFromIOConfig();
+			RT_SerializeConfigToFile(g_d3d.io.config, RT_RENDER_SETTINGS_CONFIG_FILE);
+		}
 	}
 
 	void ResetTweakvarsToDefault()
@@ -539,6 +547,18 @@ namespace
 		va_end(args);
 
 		return result;
+	}
+
+	// Profile name as shown in the settings popups: the preset file name without ".vars".
+	struct ProfileLabelText { char name[MAX_PATH]; };
+	static ProfileLabelText ProfileLabel(const char *file)
+	{
+		ProfileLabelText out;
+		snprintf(out.name, sizeof(out.name), "%s", file);
+		size_t len = strlen(out.name);
+		if (len > 5 && !_stricmp(out.name + len - 5, ".vars"))
+			out.name[len - 5] = 0;
+		return out;
 	}
 
 	// -----------------------------------------------------------------------------------------------------
@@ -3236,10 +3256,88 @@ void RenderBackend::DoDebugMenus(const RT_DoRendererDebugMenuParams *params)
 
 			ImGui::SameLine();
 
+			// Save asks where to: an existing profile, a new one, or just the current settings.
+			// Every choice also updates render_settings.vars (what the game starts with).
+			static char new_profile_name[64];
+			static bool naming_new_profile = false;
 			if (ImGui::Button("Save Settings"))
 			{
-				RT_SerializeConfigToFile(g_d3d.io.config, RT_RENDER_SETTINGS_CONFIG_FILE);
-				saved_timer = 2.0f;
+				ImGui::OpenPopup("Save to profile");
+				naming_new_profile = false;
+				new_profile_name[0] = 0;
+			}
+
+			if (ImGui::BeginPopup("Save to profile"))
+			{
+				// Top line: the profile you're on, one click to save to it.
+				if (g_d3d.io.active_profile[0])
+				{
+					char current_label[128];
+					snprintf(current_label, sizeof(current_label), "Save to profile: %s (current)", ProfileLabel(g_d3d.io.active_profile).name);
+					if (ImGui::Selectable(current_label))
+					{
+						char profile_path[MAX_PATH];
+						snprintf(profile_path, sizeof(profile_path), "assets/render_presets/%s", g_d3d.io.active_profile);
+						RT_SerializeConfigToFile(g_d3d.io.config, profile_path);
+						RT_SerializeConfigToFile(g_d3d.io.config, RT_RENDER_SETTINGS_CONFIG_FILE);
+						saved_timer = 2.0f;
+						ImGui::CloseCurrentPopup();
+					}
+				}
+				else
+				{
+					ImGui::TextUnformatted("Save to profile:");
+				}
+				ImGui::Separator();
+
+				WIN32_FIND_DATAA fd;
+				HANDLE find = FindFirstFileA("assets/render_presets/*.vars", &fd);
+				if (find != INVALID_HANDLE_VALUE)
+				{
+					do
+					{
+						if (ImGui::Selectable(ProfileLabel(fd.cFileName).name))
+						{
+							char profile_path[MAX_PATH];
+							snprintf(profile_path, sizeof(profile_path), "assets/render_presets/%s", fd.cFileName);
+							RT_SerializeConfigToFile(g_d3d.io.config, profile_path);
+							RT_SerializeConfigToFile(g_d3d.io.config, RT_RENDER_SETTINGS_CONFIG_FILE);
+							saved_timer = 2.0f;
+							ImGui::CloseCurrentPopup();
+						}
+					} while (FindNextFileA(find, &fd));
+					FindClose(find);
+				}
+
+				ImGui::Separator();
+				if (!naming_new_profile)
+				{
+					if (ImGui::Selectable("New profile...", false, ImGuiSelectableFlags_DontClosePopups))
+						naming_new_profile = true;
+				}
+				else
+				{
+					ImGui::InputText("name", new_profile_name, sizeof(new_profile_name));
+					ImGui::SameLine();
+					if (ImGui::Button("Save") && new_profile_name[0])
+					{
+						char profile_path[MAX_PATH];
+						snprintf(profile_path, sizeof(profile_path), "assets/render_presets/%s.vars", new_profile_name);
+						RT_SerializeConfigToFile(g_d3d.io.config, profile_path);
+						RT_SerializeConfigToFile(g_d3d.io.config, RT_RENDER_SETTINGS_CONFIG_FILE);
+						saved_timer = 2.0f;
+						ImGui::CloseCurrentPopup();
+					}
+				}
+
+				if (ImGui::Selectable("Current settings only (no profile)"))
+				{
+					RT_SerializeConfigToFile(g_d3d.io.config, RT_RENDER_SETTINGS_CONFIG_FILE);
+					saved_timer = 2.0f;
+					ImGui::CloseCurrentPopup();
+				}
+
+				ImGui::EndPopup();
 			}
 
 			ImGui::SameLine();
@@ -3268,6 +3366,49 @@ void RenderBackend::DoDebugMenus(const RT_DoRendererDebugMenuParams *params)
 					free(preset_name);
 				}
 
+				ImGui::EndPopup();
+			}
+
+			ImGui::SameLine();
+
+			// Pick any saved preset from assets/render_presets and apply it right away
+			// (also saved as the current render_settings.vars).
+			if (ImGui::Button("Load preset"))
+			{
+				ImGui::OpenPopup("Load preset");
+			}
+
+			if (ImGui::BeginPopup("Load preset"))
+			{
+				WIN32_FIND_DATAA fd;
+				HANDLE find = FindFirstFileA("assets/render_presets/*.vars", &fd);
+				if (find == INVALID_HANDLE_VALUE)
+				{
+					ImGui::TextUnformatted("(no presets in assets/render_presets)");
+				}
+				else
+				{
+					do
+					{
+						if (ImGui::Selectable(ProfileLabel(fd.cFileName).name))
+						{
+							char preset_path[MAX_PATH];
+							snprintf(preset_path, sizeof(preset_path), "assets/render_presets/%s", fd.cFileName);
+							int smooth = tweak_vars.smooth_transparency; // pilot setting, not the profile's
+							if (RT_DeserializeConfigFromFile(g_d3d.io.config, preset_path))
+							{
+								RT_ConfigWriteInt(g_d3d.io.config, RT_StringLiteral("smooth_transparency"), smooth);
+								UpdateTweakvarsFromIOConfig();
+								// The game picks this up as its Render Profile (RT_SyncProfileFromRenderer).
+								snprintf(g_d3d.io.active_profile, sizeof(g_d3d.io.active_profile), "%s", fd.cFileName);
+								RT_SerializeConfigToFile(g_d3d.io.config, RT_RENDER_SETTINGS_CONFIG_FILE);
+								loaded_timer = 2.0f;
+							}
+							ImGui::CloseCurrentPopup();
+						}
+					} while (FindNextFileA(find, &fd));
+					FindClose(find);
+				}
 				ImGui::EndPopup();
 			}
 
@@ -3383,6 +3524,7 @@ void RenderBackend::DoDebugMenus(const RT_DoRendererDebugMenuParams *params)
 
 			g_d3d.io.debug_render_mode = current_render_mode;
 
+			TweakVars tweak_vars_before = tweak_vars; // auto-save below when the window changed anything
 			#define TWEAK_CATEGORY_BEGIN(name) if (ImGui::CollapsingHeader(name)) { ImGui::Indent(); ImGui::PushID(name); 
 			#define TWEAK_CATEGORY_END() ImGui::Unindent(); ImGui::PopID(); }
 			#define TWEAK_BOOL(name, var, value) { bool v = tweak_vars.var; ImGui::Checkbox(name, &v); tweak_vars.var = v; }
@@ -3412,6 +3554,23 @@ void RenderBackend::DoDebugMenus(const RT_DoRendererDebugMenuParams *params)
 			#undef TWEAK_OPTIONS
 
 			WriteTweakvarsToIOConfig();
+
+			// Auto-save: once you let go of a changed setting, it is written to render_settings.vars and
+			// to the profile you're on (Smooth Transparency rides along but loads keep the pilot's own).
+			static bool render_settings_dirty = false;
+			if (memcmp(&tweak_vars_before, &tweak_vars, sizeof(tweak_vars)) != 0)
+				render_settings_dirty = true;
+			if (render_settings_dirty && !ImGui::IsAnyItemActive())
+			{
+				render_settings_dirty = false;
+				RT_SerializeConfigToFile(g_d3d.io.config, RT_RENDER_SETTINGS_CONFIG_FILE);
+				if (g_d3d.io.active_profile[0])
+				{
+					char profile_path[MAX_PATH];
+					snprintf(profile_path, sizeof(profile_path), "assets/render_presets/%s", g_d3d.io.active_profile);
+					RT_SerializeConfigToFile(g_d3d.io.config, profile_path);
+				}
+			}
 
 			// NOTE(daniel): This is a bit half-baked because I just wanted to try the early out thing.
 			if (ImGui::CollapsingHeader("Compile Time Shader Settings"))
@@ -3610,6 +3769,7 @@ void RenderBackend::EndScene()
 		{
 			TweakVars* frame_tweakvars = frame->tweak_vars.As<TweakVars>();
 			memcpy(frame_tweakvars, &tweak_vars, sizeof(TweakVars));
+
 
 			if (g_d3d.upscaling_aa_mode == UPSCALING_AA_MODE_AMD_FSR_2_2)
 			{
@@ -4351,6 +4511,8 @@ void RenderBackend::RaytraceMesh(const RT_RenderMeshParams& params)
 
 		D3D12_RAYTRACING_INSTANCE_DESC *instance_desc = frame->instance_descs.As<D3D12_RAYTRACING_INSTANCE_DESC>() + instance_index;
 		instance_desc->InstanceMask = params.instance_mask ? params.instance_mask : RT_RENDER_MASK_OBJECTS;
+		if (g_rt_instance_mask_override && instance_desc->InstanceMask == RT_RENDER_MASK_OBJECTS)
+			instance_desc->InstanceMask = g_rt_instance_mask_override; // e.g. projectiles
 		memcpy(instance_desc->Transform, params.transform, sizeof(float)*12);
 		instance_desc->AccelerationStructure = mesh_resource->blas->GetGPUVirtualAddress();
 		instance_desc->InstanceContributionToHitGroupIndex = 0;
@@ -5214,7 +5376,9 @@ void RenderBackend::RaytraceRender()
 				rt.color, fsrDepth, rt.motion, rt.fsr2_reactive_mask, render_targets[rt_taa_result[a]],
 				render_width, render_height, scene_cb->taa_jitter.x, scene_cb->taa_jitter.y,
 				g_d3d.scene.camera.near_plane, g_d3d.scene.camera.far_plane, RT_RadiansFromDegrees(g_d3d.scene.camera.vfov),
-				g_d3d.io.delta_time * 1000.0f, FSR2::GetSharpnessForFSRMode(), g_d3d.io.scene_transition
+				g_d3d.io.delta_time * 1000.0f,
+				tweak_vars.amd_fsr2_sharpness, // FSR sharpness (renderer / FSR Mode window)
+				g_d3d.io.scene_transition
 			);
 
 			ResourceTransition(command_list,rt.color,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);

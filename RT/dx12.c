@@ -294,11 +294,13 @@ void dx12_loadbmtexture_f(grs_bitmap* bm, int texfilt)
 	}
 }
 
+char *RT_TexturePath(struct RT_Arena *arena, const char *rel); // RTmaterials.c: texture pack file if the pack has it, else Original
+
 void dx12_load_png(grs_bitmap *bm, const char *basename)
 {
 	RT_ArenaMemoryScope(&g_thread_arena)
 	{
-		char *file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s_basecolor.png", basename);
+		char *file = RT_TexturePath(&g_thread_arena, RT_ArenaPrintF(&g_thread_arena, "%s_basecolor.png", basename));
 
 		RT_Image image = RT_LoadImageFromDisk(&g_thread_arena, file, 4, false);
 

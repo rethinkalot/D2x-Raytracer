@@ -83,6 +83,9 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "Core/String.h"
 #include "Core/Config.h"
 #include "Game/Lights.h"
+#include "RTmaterials.h"
+#include "RTgr.h"
+#define GR_MAX_TEXTURE_PACKS 16 // pack folders shown in Graphics > Use Custom Textures
 #endif
 
 
@@ -2052,61 +2055,585 @@ RT_Vec3 RT_GetVec3FromConfig(RT_Config* config, RT_String key)
 	return temp;
 }
 
-bool preset_changed = false;
-void preset_selection()
+// ------------------------------------------------------------------
+// Render profiles: the .vars files in assets/render_presets, shared by every pilot and
+// every texture pack. The active one is GameCfg.RenderProfile (descent.cfg), and each
+// pack remembers the profile last used with it in render_profiles.cfg ("pack=profile",
+// "Original" when no pack is on), so any profile can go with any pack.
+
+#define GR_MAX_RENDER_PROFILES 24
+#define RENDER_PROFILE_MAP_FILE "render_profiles.cfg"
+#define GR_NAME_MAX 64
+
+static int gr_compare_names(const void *a, const void *b)
 {
-	newmenu_item* m = malloc(sizeof(newmenu_item) * 3); // Enough for text + 2 default presets
-	int nitems = 0;
-	int max_items = 3;
-	int opt_gr_preset_selection = 0;
-
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Preset:"; nitems++;
-	opt_gr_preset_selection = nitems;
-
-	char** rc = PHYSFS_enumerateFiles("assets/render_presets/");
-	char** file_itterator;
-
-	for (file_itterator = rc; *file_itterator != NULL; file_itterator++){
-
-		if (nitems + 1 > max_items){
-			newmenu_item* np = realloc(m, sizeof(newmenu_item) * ++max_items);
-			if (np != NULL){
-				m = np;
-			}
-		}
-		m[nitems].type = NM_TYPE_RADIO; m[nitems].text = *file_itterator; m[nitems].value = 0; m[nitems].group = 0; nitems++;
-	}
-
-	newmenu_do1( NULL, "Preset Selection", nitems, m, NULL, NULL, 1 );
-
-	RT_RendererIO* io = RT_GetRendererIO();
-	RT_Config* config = io->config;
-
-	// Apply preset
-	int index = 0;
-	for (file_itterator = rc; *file_itterator != NULL; file_itterator++){
-		if (m[opt_gr_preset_selection + index].value == 1){
-			
-			// Should be big enough, if not, increase the size;
-			char buff[255];
-			strcpy(buff, "assets/render_presets/");
-			strcat(buff, *file_itterator);
-
-			RT_DeserializeConfigFromFile(config, buff);
-			config->last_modified_time = RT_GetHighResTime().value;
-
-			preset_changed = true;
-			con_printf(CON_DEBUG, "Applied Preset: %s", *file_itterator);
-			break;
-		}
-		index++;
-	}
-
-	PHYSFS_freeList(rc);
-	free(m);
+	return d_stricmp((const char *)a, (const char *)b);
 }
 
-int opt_gr_change_preset = 0;
+// Profile name as shown in menus: the file name without ".vars".
+static void gr_profile_label(char *out, size_t out_size, const char *file)
+{
+	size_t len;
+	snprintf(out, out_size, "%s", file);
+	len = strlen(out);
+	if (len > 5 && !d_stricmp(out + len - 5, ".vars"))
+		out[len - 5] = 0;
+}
+
+static int gr_list_render_profiles(char names[][GR_NAME_MAX], int max)
+{
+	char **rc = PHYSFS_enumerateFiles("assets/render_presets/");
+	char **it;
+	int n = 0;
+	for (it = rc; *it; it++)
+	{
+		size_t len = strlen(*it);
+		if (len > 5 && len < GR_NAME_MAX && !d_stricmp(*it + len - 5, ".vars") && n < max)
+			snprintf(names[n++], GR_NAME_MAX, "%s", *it);
+	}
+	PHYSFS_freeList(rc);
+	qsort(names, n, GR_NAME_MAX, gr_compare_names);
+	return n;
+}
+
+static const char *gr_texture_pack_key(void)
+{
+	return (GameCfg.UseCustomTextures && GameCfg.TexturePack[0]) ? GameCfg.TexturePack : "Original";
+}
+
+// Applies a profile like Raytracing Options > Change preset does, and saves it as the active one.
+// Light levels (Raytracing Options: explosion, weapon, headlight, game lights) ride along in the
+// render settings as game_* keys, so a profile or a pilot carries them. RT_StartImGuiFrame keeps
+// the keys current every frame.
+void RT_ApplyGameLightKeys(RT_Config *config)
+{
+	float v;
+	if (RT_ConfigReadFloat(config, RT_StringLiteral("game_explosion_brightness"), &v)) g_rt_dynamic_light_info.explosionBrightMod = v;
+	if (RT_ConfigReadFloat(config, RT_StringLiteral("game_weapon_brightness"), &v))    g_rt_dynamic_light_info.weaponBrightMod = v;
+	if (RT_ConfigReadFloat(config, RT_StringLiteral("game_headlight_brightness"), &v)) g_headlights.brightness = v;
+	if (RT_ConfigReadFloat(config, RT_StringLiteral("game_light_brightness"), &v))
+	{
+		g_light_multiplier_default = g_light_multiplier = v;
+		g_pending_light_update = true;
+	}
+}
+
+void RT_StoreGameLightKeys(RT_Config *config)
+{
+	RT_ConfigWriteFloat(config, RT_StringLiteral("game_explosion_brightness"), g_rt_dynamic_light_info.explosionBrightMod);
+	RT_ConfigWriteFloat(config, RT_StringLiteral("game_weapon_brightness"), g_rt_dynamic_light_info.weaponBrightMod);
+	RT_ConfigWriteFloat(config, RT_StringLiteral("game_headlight_brightness"), g_headlights.brightness);
+	RT_ConfigWriteFloat(config, RT_StringLiteral("game_light_brightness"), g_light_multiplier_default);
+}
+
+static void gr_apply_render_profile(const char *name)
+{
+	char path[128];
+	RT_Config *config = RT_GetRendererIO()->config;
+	int smooth = 1;
+	RT_ConfigReadInt(config, RT_StringLiteral("smooth_transparency"), &smooth);
+	snprintf(path, sizeof(path), "assets/render_presets/%s", name);
+	if (!RT_DeserializeConfigFromFile(config, path))
+		return;
+	RT_ConfigWriteInt(config, RT_StringLiteral("smooth_transparency"), smooth); // pilot setting, not the profile's
+	config->last_modified_time = RT_GetHighResTime().value;
+	RT_SerializeConfigToFile(config, RT_RENDER_SETTINGS_CONFIG_FILE);
+	snprintf(GameCfg.RenderProfile, sizeof(GameCfg.RenderProfile), "%s", name);
+	RT_SetLightsProfile(name); // that profile's lights (lights/<profile>/, else shared)
+	RT_ApplyGameLightKeys(config); // light levels saved in the profile itself win
+	snprintf(RT_GetRendererIO()->active_profile, sizeof(RT_GetRendererIO()->active_profile), "%s", name);
+	con_printf(CON_NORMAL, "Render profile: %s\n", name);
+}
+
+// render_profiles.cfg: one "pack=profile" line per pack.
+static int gr_read_profile_map(char packs[][GR_NAME_MAX], char profiles[][GR_NAME_MAX], int max)
+{
+	char line[2 * GR_NAME_MAX + 4];
+	int n = 0;
+	FILE *f = fopen(RENDER_PROFILE_MAP_FILE, "r");
+	if (!f)
+		return 0;
+	while (n < max && fgets(line, sizeof(line), f))
+	{
+		char *eq = strchr(line, '=');
+		size_t len;
+		if (!eq)
+			continue;
+		*eq = 0;
+		len = strlen(eq + 1);
+		while (len && isspace((unsigned char)eq[len]))
+			eq[len--] = 0;
+		snprintf(packs[n], GR_NAME_MAX, "%s", line);
+		snprintf(profiles[n], GR_NAME_MAX, "%s", eq + 1);
+		n++;
+	}
+	fclose(f);
+	return n;
+}
+
+// The profile each shipped pack starts with until you pick another one for it.
+static const char *const gr_default_pack_profiles[][2] =
+{
+	{ "Rethink", "RTXRETHINK.vars" },
+	{ "DMAX",    "RTXDMAX.vars" },
+};
+
+static int gr_profile_exists(const char *profile)
+{
+	char path[128];
+	snprintf(path, sizeof(path), "assets/render_presets/%s", profile);
+	return PHYSFSX_exists(path, 0);
+}
+
+static int gr_profile_for_pack(const char *pack, char *out, size_t out_size)
+{
+	char packs[GR_MAX_TEXTURE_PACKS + 1][GR_NAME_MAX], profiles[GR_MAX_TEXTURE_PACKS + 1][GR_NAME_MAX];
+	int i, n = gr_read_profile_map(packs, profiles, GR_MAX_TEXTURE_PACKS + 1);
+	for (i = 0; i < n; i++)
+		if (!d_stricmp(packs[i], pack) && gr_profile_exists(profiles[i]))
+		{
+			snprintf(out, out_size, "%s", profiles[i]);
+			return 1;
+		}
+	for (i = 0; i < (int)(sizeof(gr_default_pack_profiles) / sizeof(gr_default_pack_profiles[0])); i++)
+		if (!d_stricmp(gr_default_pack_profiles[i][0], pack) && gr_profile_exists(gr_default_pack_profiles[i][1]))
+		{
+			snprintf(out, out_size, "%s", gr_default_pack_profiles[i][1]);
+			return 1;
+		}
+	return 0;
+}
+
+// One frame with "Applying <pack> Textures and Shaders..." in a menu box, shown before the
+// (slow) pack/profile switch so the game doesn't look frozen.
+static void gr_show_applying(const char *pack)
+{
+	char msg[128];
+	snprintf(msg, sizeof(msg), "Applying %s Textures and Shaders...", pack);
+	RT_BeginFrame();
+	RT_StartImGuiFrame();
+	show_boxed_message(msg, 1);
+	RT_EndImguiFrame();
+	RT_EndFrame();
+	gr_flip();
+}
+
+static void gr_remember_profile_for_pack(const char *pack, const char *profile);
+
+// Graphics menu pack/profile items (built in graphics_config, used by its callback too).
+static char gr_texture_packs[GR_MAX_TEXTURE_PACKS][RT_TEXTURE_PACK_NAME_MAX]; // the menu keeps pointers to these
+static char gr_render_profiles[GR_MAX_RENDER_PROFILES][GR_NAME_MAX];
+static char gr_render_profile_labels[GR_MAX_RENDER_PROFILES][GR_NAME_MAX]; // shown without ".vars"
+static int  gr_texpack_count, gr_opt_texpack = -1, gr_opt_profilemenu = -1;
+static char gr_pending_profile[GR_NAME_MAX];        // profile picked in the menu, applied by gr_menu_apply
+static char gr_profile_item_text[GR_NAME_MAX + 32]; // "Render Profile: X" line in the Graphics menu
+
+static void gr_set_pending_profile(const char *file)
+{
+	char label[GR_NAME_MAX];
+	snprintf(gr_pending_profile, sizeof(gr_pending_profile), "%s", file);
+	gr_profile_label(label, sizeof(label), file[0] ? file : "(none)");
+	snprintf(gr_profile_item_text, sizeof(gr_profile_item_text), "Render Profile: %s", label);
+}
+
+// Graphics > Render Profile: the profiles open in their own window, so the Graphics menu stays short.
+// Enter picks the highlighted profile, Esc keeps the ticked one (Space ticks).
+static void gr_profile_menu(void)
+{
+	newmenu_item m[GR_MAX_RENDER_PROFILES];
+	int n = gr_list_render_profiles(gr_render_profiles, GR_MAX_RENDER_PROFILES), k, cur = 0, r;
+	if (!n)
+	{
+		nm_messagebox(NULL, 1, TXT_OK, "No profiles in assets\\render_presets");
+		return;
+	}
+	for (k = 0; k < n; k++)
+	{
+		gr_profile_label(gr_render_profile_labels[k], GR_NAME_MAX, gr_render_profiles[k]);
+		m[k].type = NM_TYPE_RADIO; m[k].text = gr_render_profile_labels[k];
+		m[k].value = !d_stricmp(gr_render_profiles[k], gr_pending_profile); m[k].group = 0;
+		if (m[k].value)
+			cur = k;
+	}
+	r = newmenu_do1(NULL, "Render Profile", n, m, NULL, NULL, cur);
+	if (r >= 0 && r < n)
+	{
+		gr_set_pending_profile(gr_render_profiles[r]);
+		return;
+	}
+	for (k = 0; k < n; k++)
+		if (m[k].value)
+			gr_set_pending_profile(gr_render_profiles[k]);
+}
+static char gr_applied_pack_key[GR_NAME_MAX]; // pack in effect, to tell whether a switch is needed
+extern int opt_gr_customtextures;
+
+// The pack the menu items currently point at ("Original" when Use Custom Textures is off).
+static const char *gr_menu_pack_key(newmenu_item *m)
+{
+	int k;
+	if (!m[opt_gr_customtextures].value)
+		return "Original";
+	for (k = 0; k < gr_texpack_count; k++)
+		if (m[gr_opt_texpack + k].value)
+			return gr_texture_packs[k];
+	return "Original";
+}
+
+// Picking a pack (Space) moves the Render Profile line to that pack's profile, so you see it.
+static void gr_menu_sync_profile(newmenu_item *m)
+{
+	char profile[GR_NAME_MAX];
+	if (gr_profile_for_pack(gr_menu_pack_key(m), profile, sizeof(profile)))
+		gr_set_pending_profile(profile);
+}
+
+// Applies the ticked pack and profile (Enter keeps the menu open, Esc applies on the way out).
+static void gr_menu_apply(newmenu_item *m)
+{
+	const char *chosen = NULL;
+	int k, pack_changed, profile_changed;
+
+	GameCfg.UseCustomTextures = m[opt_gr_customtextures].value;
+	for (k = 0; k < gr_texpack_count; k++)
+		if (m[gr_opt_texpack + k].value)
+			snprintf(GameCfg.TexturePack, sizeof(GameCfg.TexturePack), "%s", gr_texture_packs[k]);
+	if (gr_pending_profile[0])
+		chosen = gr_pending_profile;
+
+	pack_changed = d_stricmp(gr_applied_pack_key, gr_texture_pack_key()) != 0;
+	profile_changed = chosen && d_stricmp(chosen, GameCfg.RenderProfile);
+	if (pack_changed || profile_changed)
+		gr_show_applying(gr_texture_pack_key());
+
+	// Switches right away (reloads what is on screen); Original only when unchecked.
+	RT_SetTexturePack(GameCfg.UseCustomTextures ? GameCfg.TexturePack : "");
+	if (profile_changed)
+		gr_apply_render_profile(chosen);
+	if (GameCfg.RenderProfile[0])
+		gr_remember_profile_for_pack(gr_texture_pack_key(), GameCfg.RenderProfile);
+	snprintf(gr_applied_pack_key, sizeof(gr_applied_pack_key), "%s", gr_texture_pack_key());
+}
+
+// Pilot memory: each pilot keeps the texture pack, render profile and Smooth Transparency it last
+// used. Synced into PlayerCfg whenever the pilot file is written, applied when a pilot is selected.
+// Players/<pilot>.rtvars: the full render settings this pilot last played with (its profile's
+// values plus whatever was changed in game). The profile file itself only changes from the renderer.
+static void gr_pilot_settings_path(char *out, size_t out_size)
+{
+	snprintf(out, out_size, GameArg.SysUsePlayersDir ? "Players/%.8s.rtvars" : "%.8s.rtvars", Players[Player_num].callsign);
+}
+
+void RT_SyncPilotRenderSettings(void)
+{
+	RT_RendererIO *io = RT_GetRendererIO();
+	int smooth;
+	char path[64];
+	PlayerCfg.RTCustomTextures = GameCfg.UseCustomTextures ? 1 : 0;
+	snprintf(PlayerCfg.RTTexturePack, sizeof(PlayerCfg.RTTexturePack), "%s", GameCfg.TexturePack);
+	snprintf(PlayerCfg.RTRenderProfile, sizeof(PlayerCfg.RTRenderProfile), "%s", GameCfg.RenderProfile);
+	if (io && io->config && RT_ConfigReadInt(io->config, RT_StringLiteral("smooth_transparency"), &smooth))
+		PlayerCfg.SmoothTransparency = smooth ? 1 : 0;
+	if (io && io->config && Players[Player_num].callsign[0])
+	{
+		RT_StoreGameLightKeys(io->config); // light levels ride along in the pilot's settings file
+		gr_pilot_settings_path(path, sizeof(path));
+		RT_SerializeConfigToFile(io->config, path);
+	}
+}
+
+void RT_ApplyPilotRenderSettings(void)
+{
+	RT_RendererIO *io = RT_GetRendererIO();
+	char old_pack[GR_NAME_MAX];
+	int pack_changed, profile_changed;
+
+	snprintf(old_pack, sizeof(old_pack), "%s", gr_texture_pack_key());
+	if (PlayerCfg.RTCustomTextures != 255)
+	{
+		GameCfg.UseCustomTextures = PlayerCfg.RTCustomTextures;
+		if (PlayerCfg.RTTexturePack[0])
+			snprintf(GameCfg.TexturePack, sizeof(GameCfg.TexturePack), "%s", PlayerCfg.RTTexturePack);
+	}
+	pack_changed = d_stricmp(old_pack, gr_texture_pack_key()) != 0;
+	profile_changed = PlayerCfg.RTRenderProfile[0] && gr_profile_exists(PlayerCfg.RTRenderProfile) &&
+		d_stricmp(PlayerCfg.RTRenderProfile, GameCfg.RenderProfile);
+
+	if (!io || !io->config) // renderer not up yet: startup reads GameCfg itself
+	{
+		if (profile_changed)
+			snprintf(GameCfg.RenderProfile, sizeof(GameCfg.RenderProfile), "%s", PlayerCfg.RTRenderProfile);
+		return;
+	}
+	if (pack_changed || profile_changed)
+		gr_show_applying(gr_texture_pack_key());
+	if (pack_changed)
+		RT_SetTexturePack(GameCfg.UseCustomTextures ? GameCfg.TexturePack : ""); // no-op before bitmaps load
+	if (profile_changed)
+	{
+		gr_apply_render_profile(PlayerCfg.RTRenderProfile);
+	}
+	{
+		// Then the settings this pilot last played with, on top of the profile.
+		char path[64];
+		gr_pilot_settings_path(path, sizeof(path));
+		if (PHYSFSX_exists(path, 0) && RT_DeserializeConfigFromFile(io->config, path))
+			RT_ApplyGameLightKeys(io->config);
+	}
+	RT_ConfigWriteInt(io->config, RT_StringLiteral("smooth_transparency"), PlayerCfg.SmoothTransparency);
+	io->config->last_modified_time = RT_GetHighResTime().value;
+	RT_SerializeConfigToFile(io->config, RT_RENDER_SETTINGS_CONFIG_FILE);
+	WriteConfigFile();
+}
+
+static void gr_remember_profile_for_pack(const char *pack, const char *profile)
+{
+	char packs[GR_MAX_TEXTURE_PACKS + 1][GR_NAME_MAX], profiles[GR_MAX_TEXTURE_PACKS + 1][GR_NAME_MAX];
+	int i, n = gr_read_profile_map(packs, profiles, GR_MAX_TEXTURE_PACKS + 1);
+	FILE *f;
+	for (i = 0; i < n; i++)
+		if (!d_stricmp(packs[i], pack))
+			break;
+	if (i == n)
+	{
+		if (n == GR_MAX_TEXTURE_PACKS + 1)
+			return;
+		snprintf(packs[n++], GR_NAME_MAX, "%s", pack);
+	}
+	snprintf(profiles[i], GR_NAME_MAX, "%s", profile);
+	f = fopen(RENDER_PROFILE_MAP_FILE, "w");
+	if (!f)
+		return;
+	for (i = 0; i < n; i++)
+		fprintf(f, "%s=%s\n", packs[i], profiles[i]);
+	fclose(f);
+}
+
+// ------------------------------------------------------------------
+// Raytracing Options. The sliders are the renderer's own values (same numbers as the renderer
+// window, full range), applied live so the game behind the menu shows each change. Changes belong
+// to the pilot: saved with the pilot (Players/<pilot>.rtvars); a profile only changes from the
+// renderer window.
+
+static const char *const rt_fsr_mode_names[6] = { "No Upscaling", "High Quality", "Quality", "Balanced", "Performance", "Ultra Performance" };
+static const int rt_fsr_mode_values[6] = { 0, 5, 1, 2, 3, 4 }; // amd_fsr2_mode for each name above
+
+#define RT_SLIDER_STEPS 10 // the menu draws one character per notch: keep them small
+
+// Where a slider's value lives.
+enum { RT_VAL_CONFIG, RT_VAL_EXPLOSION, RT_VAL_WEAPON, RT_VAL_HEADLIGHT, RT_VAL_LEVEL_LIGHTS };
+
+typedef struct RT_MenuSlider
+{
+	const char *name;
+	int         where;     // RT_VAL_*
+	const char *key;       // renderer setting (RT_VAL_CONFIG)
+	float       lo, hi;    // the renderer window's range
+	float       curve;     // 1 = even steps, >1 = finer steps near the bottom
+	const char *fmt;
+	int         steps;     // notches (0 = RT_SLIDER_STEPS)
+	float       logmin;    // unused (kept for the table below)
+	const float *table;    // exact notch values (when set): the slider steps through these
+	int         table_n;
+	int         inverted;  // 1: slider right = lower value (gamma: right = brighter)
+	int         opt;       // menu item index
+	int         start;     // notch when the menu opened
+	char        label[48];
+} RT_MenuSlider;
+
+// Exact light notches: fine at the bottom, landing on 1, 5, 25, 50 ... up to the game's max.
+static const float rt_light_notches[] = {
+	0.0f, 0.05f, 0.5f, 1.0f, 3.0f, 5.0f, 10.0f, 25.0f, 50.0f, 100.0f, 160.0f };
+#define RT_LIGHT_NOTCHES_160 RT_ARRAY_COUNT(rt_light_notches)
+#define RT_LIGHT_NOTCHES_100 10 // up to 100.0
+
+static RT_MenuSlider rt_sliders[] = {
+	{ "Bloom",             RT_VAL_CONFIG,       "bloom_amount",      0.0f,   0.16f, 1.0f, "%.2f", 16 }, // 0.01 per notch
+	{ "Explosion Lights",  RT_VAL_EXPLOSION,    NULL,                0.0f,  160.0f, 1.0f, "%.2f", 0, 0, rt_light_notches, RT_LIGHT_NOTCHES_160 }, // game max 160 (renderer goes to 1000)
+	{ "Weapon Lights",     RT_VAL_WEAPON,       NULL,                0.0f,  160.0f, 1.0f, "%.2f", 0, 0, rt_light_notches, RT_LIGHT_NOTCHES_160 },
+	{ "Exposure",          RT_VAL_CONFIG,       "exposure",         -2.0f,    2.0f, 1.0f, "%.2f" },
+	{ "Specular",          RT_VAL_CONFIG,       "specular_scale",    0.0f,    1.0f, 1.0f, "%.2f" },
+	{ "Roughness",         RT_VAL_CONFIG,       "roughness_scale",   0.0f,    1.0f, 1.0f, "%.2f" },
+	{ "Gamma",             RT_VAL_CONFIG,       "gamma",            -1.0f,    1.0f, 1.0f, "%.2f", 0, 0, NULL, 0, 1 }, // right = brighter
+	{ "Sharpen",           RT_VAL_CONFIG,       "sharpen_amount",    0.0f,    8.0f, 1.0f, "%.2f" },
+	{ "Vignette",          RT_VAL_CONFIG,       "vignette_strength", 0.0f,    1.0f, 1.0f, "%.2f" },
+	{ "FOV",               RT_VAL_CONFIG,       "fov",              90.0f,  120.0f, 1.0f, "%.0f", 15 }, // full renderer range, 2 degrees per notch
+	{ "Headlight",         RT_VAL_HEADLIGHT,    NULL,                0.0f,  100.0f, 1.0f, "%.2f", 0, 0, rt_light_notches, RT_LIGHT_NOTCHES_100 },
+	{ "Global Game Lights", RT_VAL_LEVEL_LIGHTS, NULL,                1.0f,   15.0f, 1.0f, "%.2f", 14 }, // 1 per notch
+};
+enum { RT_S_BLOOM, RT_S_EXPLOSION, RT_S_WEAPON, RT_S_EXPOSURE, RT_S_SPECULAR, RT_S_ROUGHNESS,
+       RT_S_GAMMA, RT_S_SHARPEN, RT_S_VIGNETTE, RT_S_FOV, RT_S_HEADLIGHT,
+       RT_S_LIGHT_BRIGHTNESS, RT_S_COUNT };
+
+static float rt_slider_get(const RT_MenuSlider *s)
+{
+	float v = 0.0f;
+	switch (s->where)
+	{
+		case RT_VAL_CONFIG:       RT_ConfigReadFloat(RT_GetRendererIO()->config, RT_StringFromCString(s->key), &v); break;
+		case RT_VAL_EXPLOSION:    v = g_rt_dynamic_light_info.explosionBrightMod; break;
+		case RT_VAL_WEAPON:       v = g_rt_dynamic_light_info.weaponBrightMod; break;
+		case RT_VAL_HEADLIGHT:    v = g_headlights.brightness; break;
+		case RT_VAL_LEVEL_LIGHTS: v = g_light_multiplier_default; break;
+	}
+	return v;
+}
+
+static void rt_slider_set(const RT_MenuSlider *s, float v)
+{
+	switch (s->where)
+	{
+		case RT_VAL_CONFIG:       RT_ConfigWriteFloat(RT_GetRendererIO()->config, RT_StringFromCString(s->key), v); break;
+		case RT_VAL_EXPLOSION:    g_rt_dynamic_light_info.explosionBrightMod = v; break;
+		case RT_VAL_WEAPON:       g_rt_dynamic_light_info.weaponBrightMod = v; break;
+		case RT_VAL_HEADLIGHT:    g_headlights.brightness = v; break;
+		case RT_VAL_LEVEL_LIGHTS: g_light_multiplier_default = g_light_multiplier = v; g_pending_light_update = true; break;
+	}
+}
+
+static int rt_slider_steps(const RT_MenuSlider *s)
+{
+	if (s->table)
+		return s->table_n - 1;
+	return s->steps ? s->steps : RT_SLIDER_STEPS;
+}
+
+static int rt_slider_notch(const RT_MenuSlider *s, float v)
+{
+	if (s->table) // nearest exact notch
+	{
+		int k, best = 0;
+		for (k = 1; k < s->table_n; k++)
+			if (fabsf(s->table[k] - v) < fabsf(s->table[best] - v))
+				best = k;
+		return best;
+	}
+	float t = RT_CLAMP((v - s->lo) / (s->hi - s->lo), 0.0f, 1.0f);
+	if (s->inverted)
+		t = 1.0f - t;
+	return (int)(powf(t, 1.0f / s->curve) * rt_slider_steps(s) + 0.5f);
+}
+
+static float rt_slider_value(const RT_MenuSlider *s, int notch)
+{
+	if (s->table)
+		return s->table[RT_CLAMP(notch, 0, s->table_n - 1)];
+	float t = powf((float)notch / rt_slider_steps(s), s->curve);
+	if (s->inverted)
+		t = 1.0f - t;
+	return s->lo + (s->hi - s->lo) * t;
+}
+
+static void rt_slider_label(RT_MenuSlider *s, float v)
+{
+	char num[24];
+	snprintf(num, sizeof(num), s->fmt, v);
+	snprintf(s->label, sizeof(s->label), "%s: %s", s->name, num);
+}
+
+static int  rt_opt_render_mode, rt_opt_fsr_mode; // render mode radios: Off, TAA, FSR
+static int  rt_fsr_mode_pending, rt_fsr_mode_start;
+static float rt_fsr_sharpness;
+static int  rt_fsr_sharpness_changed;
+static char rt_fsr_mode_label[48];
+
+static void rt_update_fsr_label(void)
+{
+	snprintf(rt_fsr_mode_label, sizeof(rt_fsr_mode_label), "  FSR Mode: %s", rt_fsr_mode_names[rt_fsr_mode_pending]);
+}
+
+// Render Mode > FSR Mode: the modes and the FSR sharpening in their own window.
+static void rt_fsr_mode_menu(void)
+{
+	static char sharpen_label[48];
+	newmenu_item m[9];
+	int n = 0, k, opt_first, opt_sharpen;
+	opt_first = n;
+	for (k = 0; k < 6; k++)
+	{
+		m[n].type = NM_TYPE_RADIO; m[n].text = (char *)rt_fsr_mode_names[k];
+		m[n].value = (k == rt_fsr_mode_pending); m[n].group = 0; n++;
+	}
+	m[n].type = NM_TYPE_TEXT; m[n].text = ""; n++;
+	opt_sharpen = n;
+	snprintf(sharpen_label, sizeof(sharpen_label), "FSR Sharpening: %.2f", rt_fsr_sharpness);
+	m[n].type = NM_TYPE_SLIDER; m[n].text = sharpen_label; m[n].value = (int)(RT_CLAMP(rt_fsr_sharpness, 0.0f, 1.0f) * RT_SLIDER_STEPS + 0.5f);
+	m[n].min_value = 0; m[n].max_value = RT_SLIDER_STEPS; n++;
+	int sharpen_start = m[opt_sharpen].value;
+
+	newmenu_do1(NULL, "FSR Mode", n, m, NULL, NULL, opt_first + rt_fsr_mode_pending);
+
+	for (k = 0; k < 6; k++)
+		if (m[opt_first + k].value)
+			rt_fsr_mode_pending = k;
+	if (m[opt_sharpen].value != sharpen_start)
+	{
+		rt_fsr_sharpness = (float)m[opt_sharpen].value / RT_SLIDER_STEPS;
+		RT_ConfigWriteFloat(RT_GetRendererIO()->config, RT_StringLiteral("amd_fsr2_sharpness"), rt_fsr_sharpness);
+		rt_fsr_sharpness_changed = 1;
+	}
+	rt_update_fsr_label();
+}
+
+static void rt_show_fsr_mode(newmenu_item *items, int show)
+{
+	items[rt_opt_fsr_mode].type = show ? NM_TYPE_MENU : NM_TYPE_TEXT;
+	items[rt_opt_fsr_mode].text = show ? rt_fsr_mode_label : "";
+}
+
+// Raytracing Options state while the menu is open.
+static int rt_menu_nitems;
+static int start_values[48];
+static int opt_ignore_materials, opt_raytracing, opt_pbr, opt_flash_mul, opt_retrace_rays;
+static int opt_soft_transparency, opt_lights_shadows, opt_projectile_shadows;
+
+// Pushes the menu's current values into the renderer and the game right away (only what was
+// changed since the menu opened), and refreshes the value shown in each slider's label.
+static void rt_menu_apply(newmenu_item *m)
+{
+	RT_Config *config = RT_GetRendererIO()->config;
+	int k;
+
+#define RT_WRITE_CHECK(opt, key) \
+	if (m[opt].value != start_values[opt]) RT_ConfigWriteInt(config, RT_StringLiteral(key), m[opt].value);
+	RT_WRITE_CHECK(opt_ignore_materials, "override_materials");
+	RT_WRITE_CHECK(opt_retrace_rays, "retrace_rays");
+	RT_WRITE_CHECK(opt_raytracing, "enable_pathtracing");
+	RT_WRITE_CHECK(opt_pbr, "enable_pbr");
+	RT_WRITE_CHECK(opt_flash_mul, "screen_flash_mul");
+	RT_WRITE_CHECK(opt_soft_transparency, "smooth_transparency");
+	RT_WRITE_CHECK(opt_lights_shadows, "lights_cast_shadows");
+	RT_WRITE_CHECK(opt_projectile_shadows, "projectiles_cast_shadows");
+#undef RT_WRITE_CHECK
+	for (k = 0; k < 3; k++)
+		if (m[rt_opt_render_mode + k].value && !start_values[rt_opt_render_mode + k])
+			RT_ConfigWriteInt(config, RT_StringLiteral("upscaling_aa_mode"), k);
+	if (rt_fsr_mode_pending != rt_fsr_mode_start)
+		RT_ConfigWriteInt(config, RT_StringLiteral("amd_fsr2_mode"), rt_fsr_mode_values[rt_fsr_mode_pending]);
+
+	for (k = 0; k < RT_S_COUNT; k++)
+	{
+		RT_MenuSlider *s = &rt_sliders[k];
+		if (m[s->opt].value != s->start)
+		{
+			float v = rt_slider_value(s, m[s->opt].value);
+			rt_slider_set(s, v);
+			rt_slider_label(s, v);
+		}
+	}
+
+
+	config->last_modified_time = RT_GetHighResTime().value; // renderer picks the changes up next frame
+}
+
+static int rt_menu_any_changed(newmenu_item *m)
+{
+	int k, changed = rt_fsr_mode_pending != rt_fsr_mode_start || rt_fsr_sharpness_changed;
+	for (k = 0; k < rt_menu_nitems; k++)
+		changed |= (m[k].value != start_values[k]);
+	return changed;
+}
+
 int raytrace_config_menuset(newmenu *menu, d_event *event, void *userdata)
 {
 	newmenu_item *items = newmenu_get_items(menu);
@@ -2116,253 +2643,124 @@ int raytrace_config_menuset(newmenu *menu, d_event *event, void *userdata)
 
 	switch (event->type)
 	{
-		case EVENT_NEWMENU_SELECTED:
-			if (citem == opt_gr_change_preset) {
-				preset_selection();
-				return 0;
-			}
-			
-			return 1;		// stay in menu
+		case EVENT_NEWMENU_CHANGED:
+			// The FSR Mode line only shows while FSR is the render mode.
+			if (citem >= rt_opt_render_mode && citem < rt_opt_render_mode + 3)
+				rt_show_fsr_mode(items, items[rt_opt_render_mode + 2].value);
+			rt_menu_apply(items); // live: see it in the game behind the menu
 			break;
+
+		case EVENT_NEWMENU_SELECTED:
+			if (citem == rt_opt_fsr_mode)
+			{
+				rt_fsr_mode_menu();
+				rt_menu_apply(items);
+			}
+			return 1;		// stay in menu
 
 		default:
 			break;
 	}
-
 
 	return 0;
 }
 
 void raytrace_config()
 {
-	newmenu_item m[51];
+	newmenu_item m[48];
 	int nitems = 0;
-
-	int opt_gr_vsync = 0;
-	int opt_gr_retrace_rays = 0;
-
-	// Pathtracing ops
-	int opt_gr_enable_pathtracing = 0, opt_gr_enable_pbr = 0, opt_gr_important_sample_brdf = 0, opt_gr_lighting_quality = 0;
-
-	// TAA & AMD FSR 3.1 ops
-	int opt_gr_upscaling_aa_mode = 0,opt_gr_amd_fsr2_mode = 0;
-
-	// Motion Blur ops
-	int opt_gr_motion_blur_quality = 0, opt_gr_motion_blur_strength = 0;
-
-	// Bloom ops
-	int opt_gr_bloom_amount = 0, opt_gr_bloom_threshold = 0;
-
-	// FOV
-	int opt_gr_fov = 0;
-
-	// Post Processing ops
-	int opt_gr_sharpen_amount = 0, opt_gr_gamma = 0, opt_gr_vignette_scale = 0, opt_gr_vignette_strength = 0;
+	int flash_mul = 1, upscaling, fsr_mode, k;
 
 	RT_RendererIO* io = RT_GetRendererIO();
 	RT_Config* config = io->config;
 
-	// --- PRESETS ---
+#define RT_CHECK(var, label, key) \
+	var = nitems; m[nitems].type = NM_TYPE_CHECK; m[nitems].text = label; \
+	m[nitems].value = RT_GetIntFromConfig(config, RT_StringLiteral(key)) != 0; nitems++;
+#define RT_SLIDER(index) { \
+	RT_MenuSlider *s = &rt_sliders[index]; float v = rt_slider_get(s); \
+	rt_slider_label(s, v); s->opt = nitems; s->start = rt_slider_notch(s, v); \
+	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = s->label; m[nitems].value = s->start; \
+	m[nitems].min_value = 0; m[nitems].max_value = rt_slider_steps(s); nitems++; }
 
-	preset_changed = false;
-	opt_gr_change_preset = nitems;
-	m[nitems].type = NM_TYPE_MENU; m[nitems].text = " Use Preset"; nitems++;
-
-	// --- VSync ---
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
-	opt_gr_vsync = nitems;
-	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "VSync";  m[nitems].value = RT_GetIntFromConfig(config, RT_StringLiteral("vsync")); nitems++;
-
-	// --- PATHTRACING ---
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Pathtracing:"; nitems++;
-
-	opt_gr_enable_pathtracing = nitems;
-	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Enable pathtraced GI"; m[nitems].value = RT_GetIntFromConfig(config, RT_StringLiteral("enable_pathtracing")); nitems++;
-
-	opt_gr_enable_pbr = nitems;
-	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Enable physically-based rendering"; m[nitems].value = RT_GetIntFromConfig(config, RT_StringLiteral("enable_pbr")); nitems++;
+	RT_CHECK(opt_raytracing, "Enable Pathtracing", "enable_pathtracing");
+	RT_CHECK(opt_pbr, "Enable PBR", "enable_pbr");
 
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Lighting Quality:"; nitems++;
-	opt_gr_lighting_quality = nitems;
-	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = " Low"; m[nitems].value = 0; m[nitems].group = opt_gr_lighting_quality; nitems++;
-	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = " Medium"; m[nitems].value = 0; m[nitems].group = opt_gr_lighting_quality; nitems++;
-	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = " High"; m[nitems].value = 0; m[nitems].group = opt_gr_lighting_quality; nitems++;
-	int lighting_mode = RT_GetIntFromConfig(config, RT_StringLiteral("ris"));
-	m[opt_gr_lighting_quality+lighting_mode].value = 1;
+	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Render Mode:"; nitems++;
+	upscaling = RT_GetIntFromConfig(config, RT_StringLiteral("upscaling_aa_mode"));
+	if (upscaling < 0 || upscaling > 2)
+		upscaling = 0;
+	rt_opt_render_mode = nitems;
+	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = "Off"; m[nitems].value = (upscaling == 0); m[nitems].group = 1; nitems++;
+	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = "TAA"; m[nitems].value = (upscaling == 1); m[nitems].group = 1; nitems++;
+	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = "FSR"; m[nitems].value = (upscaling == 2); m[nitems].group = 1; nitems++;
+	fsr_mode = RT_GetIntFromConfig(config, RT_StringLiteral("amd_fsr2_mode"));
+	rt_fsr_mode_pending = 2; // Quality
+	for (k = 0; k < 6; k++)
+		if (rt_fsr_mode_values[k] == fsr_mode)
+			rt_fsr_mode_pending = k;
+	rt_fsr_mode_start = rt_fsr_mode_pending;
+	rt_fsr_sharpness = 0.0f;
+	rt_fsr_sharpness_changed = 0;
+	RT_ConfigReadFloat(config, RT_StringLiteral("amd_fsr2_sharpness"), &rt_fsr_sharpness);
+	rt_update_fsr_label();
+	rt_opt_fsr_mode = nitems;
+	m[nitems].type = NM_TYPE_MENU; m[nitems].text = rt_fsr_mode_label; nitems++;
+	rt_show_fsr_mode(m, upscaling == 2);
 
-	int opt_gr_bilinear = nitems;
-	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Smooth Textures"; m[nitems].value = RT_GetIntFromConfig(config, RT_StringLiteral("smooth_textures")); nitems++;
-
-	// --- TAA & AMD FSR 3.1 ---
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Upscaling & Anti-aliasing:"; nitems++;
-	opt_gr_upscaling_aa_mode = nitems;
+	RT_SLIDER(RT_S_BLOOM);
+	RT_SLIDER(RT_S_EXPLOSION);
+	RT_SLIDER(RT_S_WEAPON);
 
-	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = " Off"; m[nitems].value = 0; m[nitems].group = opt_gr_upscaling_aa_mode; nitems++;
-	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = " TAA"; m[nitems].value = 0; m[nitems].group = opt_gr_upscaling_aa_mode; nitems++;
-	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = " AMD FSR 3.1"; m[nitems].value = 0; m[nitems].group = opt_gr_upscaling_aa_mode; nitems++;
-	int upscaling_aa_mode = RT_GetIntFromConfig(config, RT_StringLiteral("upscaling_aa_mode"));
-	m[opt_gr_upscaling_aa_mode + upscaling_aa_mode].value = 1;
-
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "AMD FSR mode:"; nitems++;
-	opt_gr_amd_fsr2_mode = nitems;
-	const int fsr_menu_modes[6] = { 0, 5, 1, 2, 3, 4 };
-
-	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = " No Upscaling"; m[nitems].value = 0; m[nitems].group = opt_gr_amd_fsr2_mode; nitems++;
-	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = " High Quality"; m[nitems].value = 0; m[nitems].group = opt_gr_amd_fsr2_mode; nitems++;
-	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = " Quality"; m[nitems].value = 0; m[nitems].group = opt_gr_amd_fsr2_mode; nitems++;
-	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = " Balanced"; m[nitems].value = 0; m[nitems].group = opt_gr_amd_fsr2_mode; nitems++;
-	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = " Performance"; m[nitems].value = 0; m[nitems].group = opt_gr_amd_fsr2_mode; nitems++;
-	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = " Ultra performance"; m[nitems].value = 0; m[nitems].group = opt_gr_amd_fsr2_mode; nitems++;
-	int amd_fsr2_mode = RT_GetIntFromConfig(config, RT_StringLiteral("amd_fsr2_mode"));
-	if (amd_fsr2_mode < 0 || amd_fsr2_mode > 5)
-		amd_fsr2_mode = 1;
-	for (int i = 0; i < 6; ++i)
-		if (fsr_menu_modes[i] == amd_fsr2_mode)
-			m[opt_gr_amd_fsr2_mode + i].value = 1;
-
-	// --- MOTION BLUR ---
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Motion Blur:"; nitems++;
-	
-	opt_gr_motion_blur_quality = nitems;
-	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Use motion blur"; m[nitems].value = RT_GetIntFromConfig(config, RT_StringLiteral("motion_blur_quality")); nitems++;
+	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Tonemap:"; nitems++;
+	RT_SLIDER(RT_S_EXPOSURE);
 
-	opt_gr_motion_blur_strength = nitems;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "Motion blur strength"; m[nitems].value = (int)(RT_GetFloatFromConfig(config, RT_StringLiteral("motion_blur_curve")) * 10.0); m[nitems].min_value = 0; m[nitems].max_value = 10; nitems++;
-
-	// --- BLOOM ---
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Bloom:"; nitems++;
-	
-	opt_gr_bloom_amount = nitems;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "Amount"; m[nitems].value = (int)(RT_GetFloatFromConfig(config, RT_StringLiteral("bloom_amount")) * 75.0f); m[nitems].min_value = 0; m[nitems].max_value = 25; nitems++;
-
-	// --- FOV ---
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Horizontal FOV (90 - 120):"; nitems++;
-
-	opt_gr_fov = nitems;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "Amount"; m[nitems].value = (int)(RT_GetFloatFromConfig(config, RT_StringLiteral("fov"))) - 90; m[nitems].min_value = 0; m[nitems].max_value = 30; nitems++;
-
-	// --- POST PROCESSING ---
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Post Processing:"; nitems++;
+	RT_SLIDER(RT_S_GAMMA);
+	RT_SLIDER(RT_S_SHARPEN);
+	RT_SLIDER(RT_S_VIGNETTE);
 
-	opt_gr_sharpen_amount = nitems;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "Sharpen amount:"; m[nitems].value = (int)(RT_GetFloatFromConfig(config, RT_StringLiteral("sharpen_amount")) * 2.f); m[nitems].min_value = 0; m[nitems].max_value = 8; nitems++;
-
-	opt_gr_gamma = nitems;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "Gamma:"; m[nitems].value = (int)((1.0f - RT_GetFloatFromConfig(config, RT_StringLiteral("gamma"))) * 10.f); m[nitems].min_value = 0; m[nitems].max_value = 20; nitems++;
-
-	opt_gr_vignette_scale = nitems;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "Vignette Scale:"; m[nitems].value = (int)(RT_GetFloatFromConfig(config, RT_StringLiteral("vignette_scale")) * 10.f); m[nitems].min_value = 5; m[nitems].max_value = 15; nitems++;
-
-	opt_gr_vignette_strength = nitems;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "Vignette Strength:"; m[nitems].value = (int)(RT_GetFloatFromConfig(config, RT_StringLiteral("vignette_strength")) * 10.f); m[nitems].min_value = 0; m[nitems].max_value = 10; nitems++;
-
-	// --- OTHER ---
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Other:"; nitems++;
-	opt_gr_retrace_rays = nitems;
-	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Retrace Rays"; m[nitems].value = RT_GetIntFromConfig(config, RT_StringLiteral("retrace_rays")); nitems++;
+	RT_SLIDER(RT_S_HEADLIGHT);
+	RT_SLIDER(RT_S_FOV);
+	RT_SLIDER(RT_S_LIGHT_BRIGHTNESS);
 
-	int headlight_brightness = (int)roundf(g_headlights.brightness * 5.0f);
-	int opt_gr_headlight_brightness = nitems;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "Headlight Brightness:"; m[nitems].value = headlight_brightness; m[nitems].min_value = 0; m[nitems].max_value = 15; nitems++;
+
+	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
+	// Flash screen multiplier (Ingame Tools > Miscellaneous): 0 = no screen flash, 1 = normal.
+	RT_ConfigReadInt(config, RT_StringLiteral("screen_flash_mul"), &flash_mul);
+	opt_flash_mul = nitems;
+	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "Screen Flash (0 = off)"; m[nitems].value = RT_CLAMP(flash_mul, 0, 10);
+	m[nitems].min_value = 0; m[nitems].max_value = 10; nitems++;
+
+	// Same order as the renderer window's Pathtracer section.
+	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
+	RT_CHECK(opt_ignore_materials, "Override Materials", "override_materials");
+	RT_CHECK(opt_retrace_rays, "Retrace Rays", "retrace_rays");
+	RT_SLIDER(RT_S_SPECULAR);
+	RT_SLIDER(RT_S_ROUGHNESS);
+	RT_CHECK(opt_soft_transparency, "Smooth Transparency", "smooth_transparency");
+	RT_CHECK(opt_lights_shadows, "Lights Cast Shadows", "lights_cast_shadows");
+	RT_CHECK(opt_projectile_shadows, "Projectiles Cast Shadows", "projectiles_cast_shadows");
+
+#undef RT_CHECK
+#undef RT_SLIDER
 
 	RT_ASSERT(nitems <= RT_ARRAY_COUNT(m));
+	for (k = 0; k < nitems; k++)
+		start_values[k] = m[k].value;
+	rt_menu_nitems = nitems;
 
-	newmenu_do1( NULL, "Raytracing Options", nitems, m, raytrace_config_menuset, NULL, 1 );
+	newmenu_do1( NULL, "Raytracing Options", nitems, m, raytrace_config_menuset, NULL, 0 );
 
-	g_headlights.brightness = (float)m[opt_gr_headlight_brightness].value / 5.0f;
-	RT_SaveHeadLightSettings();
-
-	if (!preset_changed){
-		RT_ConfigWriteInt(config, RT_StringLiteral("vsync"), m[opt_gr_vsync].value);
-		RT_ConfigWriteInt(config, RT_StringLiteral("retrace_rays"), m[opt_gr_retrace_rays].value);
-
-		RT_ConfigWriteInt(config, RT_StringLiteral("enable_pathtracing"), m[opt_gr_enable_pathtracing].value);
-		RT_ConfigWriteInt(config, RT_StringLiteral("enable_pbr"), m[opt_gr_enable_pbr].value);
-		for(int i = 0; i < 3; i++)
-		{
-			if(m[opt_gr_lighting_quality+i].value == 1)
-			{
-				lighting_mode = i;
-			}
-		}
-
-		switch(lighting_mode)
-		{
-			// LOW
-			case 0:
-			RT_ConfigWriteInt(config, RT_StringLiteral("svgf_max_hist_len_diff"), 16);
-			RT_ConfigWriteInt(config, RT_StringLiteral("svgf_max_hist_len_spec"), 16);
-			break;
-
-			// Medium
-			case 1:
-			RT_ConfigWriteInt(config, RT_StringLiteral("svgf_max_hist_len_diff"), 12);
-			RT_ConfigWriteInt(config, RT_StringLiteral("svgf_max_hist_len_spec"), 12);
-			break;
-
-			//High
-			case 2:
-			RT_ConfigWriteInt(config, RT_StringLiteral("svgf_max_hist_len_diff"), 4);
-			RT_ConfigWriteInt(config, RT_StringLiteral("svgf_max_hist_len_spec"), 4);
-			break;
-
-			default:
-			break;
-		}
-
-		RT_ConfigWriteInt(config, RT_StringLiteral("ris"), lighting_mode);
-
-		for (int i = 0; i < 3; i++)
-		{
-			if (m[opt_gr_upscaling_aa_mode + i].value == 1)
-			{
-				RT_ConfigWriteInt(config, RT_StringLiteral("upscaling_aa_mode"), i);
-			}
-		}
-		for (int i = 0; i < 6; i++)
-		{
-			if (m[opt_gr_amd_fsr2_mode + i].value == 1)
-			{
-				RT_ConfigWriteInt(config, RT_StringLiteral("amd_fsr2_mode"), fsr_menu_modes[i]);
-			}
-		}
-		if (m[opt_gr_bilinear].value)
-		{
-			RT_ConfigWriteInt(config, RT_StringLiteral("smooth_textures"), true);
-			RT_ConfigWriteInt(config, RT_StringLiteral("albedo_sample_linear"), 1);
-			RT_ConfigWriteInt(config, RT_StringLiteral("normal_sample_linear"), 1);
-			RT_ConfigWriteInt(config, RT_StringLiteral("metallic_roughness_sample_linear"), 1);
-		}
-		else
-		{
-			RT_ConfigWriteInt(config, RT_StringLiteral("smooth_textures"), false);
-			RT_ConfigWriteInt(config, RT_StringLiteral("albedo_sample_linear"), 0);
-			RT_ConfigWriteInt(config, RT_StringLiteral("normal_sample_linear"), 0);
-			RT_ConfigWriteInt(config, RT_StringLiteral("metallic_roughness_sample_linear"), 0);
-		}
-
-		RT_ConfigWriteInt(config, RT_StringLiteral("motion_blur_quality"), m[opt_gr_motion_blur_quality].value);
-		RT_ConfigWriteFloat(config, RT_StringLiteral("motion_blur_curve"), m[opt_gr_motion_blur_strength].value/10.0f);
-
-		RT_ConfigWriteFloat(config, RT_StringLiteral("bloom_amount"), ((float)m[opt_gr_bloom_amount].value)/75.0f);
-
-		RT_ConfigWriteFloat(config, RT_StringLiteral("fov"), ((float)m[opt_gr_fov].value + 90));
-
-		RT_ConfigWriteFloat(config, RT_StringLiteral("sharpen_amount"), ((float)m[opt_gr_sharpen_amount].value)/2.0f);
-		RT_ConfigWriteFloat(config, RT_StringLiteral("gamma"), 1.0f - ((float)m[opt_gr_gamma].value/10.0f));
-		RT_ConfigWriteFloat(config, RT_StringLiteral("vignette_scale"), ((float)m[opt_gr_vignette_scale].value)/10.0f);
-		RT_ConfigWriteFloat(config, RT_StringLiteral("vignette_strength"), ((float)m[opt_gr_vignette_strength].value)/10.0f);
-		RT_SerializeConfigToFile(config, RT_RENDER_SETTINGS_CONFIG_FILE); 
-		config->last_modified_time = RT_GetHighResTime().value;
-	}
+	if (!rt_menu_any_changed(m))
+		return;
+	rt_menu_apply(m);
+	RT_SerializeConfigToFile(config, RT_RENDER_SETTINGS_CONFIG_FILE);
 }
 #endif
 
@@ -2400,6 +2798,12 @@ int graphics_config_menuset(newmenu *menu, d_event *event, void *userdata)
 			}
 			if ( citem == opt_gr_brightness)
 				gr_palette_set_gamma(items[citem].value);
+#ifdef RT_DX12
+			// Picking a pack (or toggling Use Custom Textures) shows that pack's profile right away.
+			if (citem == opt_gr_customtextures ||
+				(gr_opt_texpack >= 0 && citem >= gr_opt_texpack && citem < gr_opt_texpack + gr_texpack_count))
+				gr_menu_sync_profile(items);
+#endif
 			break;
 
 		case EVENT_NEWMENU_SELECTED:
@@ -2409,6 +2813,11 @@ int graphics_config_menuset(newmenu *menu, d_event *event, void *userdata)
 			if (citem == opt_gr_vrmenu) vr_graphics_config();
 			if (citem == opt_gr_raytracemenu)
 				raytrace_config();
+			if (citem == gr_opt_profilemenu)
+				gr_profile_menu();
+			// Enter on Use Custom Textures, a pack or Render Profile: apply now, stay in the menu.
+			if (citem >= opt_gr_customtextures && citem <= gr_opt_profilemenu)
+				gr_menu_apply(items);
 #endif
 			
 			return 1;		// stay in menu
@@ -2428,7 +2837,9 @@ void graphics_config()
 	newmenu_item m[23]; // +1 for 3D Briefing Robots
 	int i = 0;
 #elif RT_DX12
-	newmenu_item m[12];
+	// +2 for Use Custom Textures and a spacer, + one radio per texture pack folder.
+	newmenu_item m[17 + GR_MAX_TEXTURE_PACKS + GR_MAX_RENDER_PROFILES];
+	int k;
 #else
 	// +1 headroom for the conditional VSync item (see gr_vsync_supported).
 	newmenu_item m[7];
@@ -2454,16 +2865,48 @@ void graphics_config()
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "3D Briefing Robots"; m[nitems].value = GameCfg.BriefingRobots3D; nitems++;
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
 #endif
+#ifdef RT_DX12
+	// Texture packs: every folder in assets\textures is a pack, layered over the Original textures.
+	// One at a time; nothing is read from a pack folder unless Use Custom Textures is on.
+	opt_gr_customtextures = nitems;
+	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Use Custom Textures"; m[nitems].value = GameCfg.UseCustomTextures; nitems++;
+	gr_texpack_count = RT_ListTexturePacks(gr_texture_packs, GR_MAX_TEXTURE_PACKS);
+	gr_opt_texpack = -1;
+	if (gr_texpack_count)
+	{
+		int selected = 0;
+		for (k = 0; k < gr_texpack_count; k++)
+			if (!d_stricmp(gr_texture_packs[k], GameCfg.TexturePack))
+				selected = k;
+		gr_opt_texpack = nitems;
+		for (k = 0; k < gr_texpack_count; k++)
+		{
+			m[nitems].type = NM_TYPE_RADIO; m[nitems].text = gr_texture_packs[k];
+			m[nitems].value = (k == selected); m[nitems].group = 0; nitems++;
+		}
+	}
+	else
+	{
+		m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "(no pack folders in assets\\textures)"; nitems++;
+	}
+	// Render profiles (assets\render_presets), usable with any pack; a pack remembers its last one.
+	// The list opens in its own window (gr_profile_menu) so many profiles don't crowd this menu.
+	gr_set_pending_profile(GameCfg.RenderProfile);
+	gr_opt_profilemenu = nitems;
+	m[nitems].type = NM_TYPE_MENU; m[nitems].text = gr_profile_item_text; nitems++;
+	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
+	snprintf(gr_applied_pack_key, sizeof(gr_applied_pack_key), "%s", gr_texture_pack_key());
+	opt_gr_vrmenu = nitems;
+	m[nitems].type=NM_TYPE_MENU;m[nitems].text="VR Graphics";nitems++;
+	opt_gr_raytracemenu = nitems;
+	m[nitems].type = NM_TYPE_MENU; m[nitems].text = "Raytracing Options"; nitems++;
+#endif
 	opt_gr_brightness = nitems;
 	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_BRIGHTNESS; m[nitems].value = gr_palette_get_gamma(); m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
 	opt_gr_reticlemenu = nitems;
 	m[nitems].type = NM_TYPE_MENU; m[nitems].text = "Reticle Options"; nitems++;
 
 #ifdef RT_DX12
-	opt_gr_vrmenu = nitems;
-	m[nitems].type=NM_TYPE_MENU;m[nitems].text="VR Graphics";nitems++;
-	opt_gr_raytracemenu = nitems;
-	m[nitems].type = NM_TYPE_MENU; m[nitems].text = "Raytracing Options"; nitems++;
 	opt_gr_shieldfx = nitems;
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Shield Effects"; m[nitems].value = PlayerCfg.ShieldEffects; nitems++;
 #endif // RT_DX12
@@ -2571,6 +3014,7 @@ void graphics_config()
 	PlayerCfg.DisableCockpit = m[opt_gr_disablecockpit].value;
 #ifdef RT_DX12
 	PlayerCfg.ShieldEffects = m[opt_gr_shieldfx].value;
+	gr_menu_apply(m); // pack + profile (Esc applies on the way out)
 #endif
 
 

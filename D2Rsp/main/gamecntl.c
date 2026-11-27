@@ -382,6 +382,7 @@ int pause_handler(window *wind, d_event *event, char *msg)
 #ifdef RT_DX12
 				case KEY_SHIFTED + KEY_ALTED + KEY_F1:
 					g_rt_enable_debug_menu = !g_rt_enable_debug_menu;
+					event_refresh_grab(); // free the mouse while the menus are open
 					return 1;
 #endif
 				default:
@@ -863,6 +864,7 @@ int HandleSystemKey(int key)
 		case KEY_SHIFTED + KEY_ALTED + KEY_F1:
 		{
 			g_rt_enable_debug_menu = !g_rt_enable_debug_menu;
+			event_refresh_grab(); // free the mouse while the menus are open
 		} break;
 
 		case KEY_SHIFTED + KEY_ALTED + KEY_F2:

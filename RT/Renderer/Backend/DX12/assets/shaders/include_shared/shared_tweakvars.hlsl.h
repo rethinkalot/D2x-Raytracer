@@ -44,6 +44,11 @@ TWEAK_OPTIONS("Normal Map Sampler",        normal_sample_linear,             0, 
 TWEAK_OPTIONS("Metallic/Roughness Sampler",metallic_roughness_sample_linear, 0, "Point", "Linear")
 TWEAK_BOOL   ("Override Materials",        override_materials,        false)
 TWEAK_BOOL   ("Retrace Rays",              retrace_rays,              false)
+TWEAK_FLOAT  ("Specular",                  specular_scale,            1.0,      0,    1) // scales specular/reflections (also in Raytracing Options)
+TWEAK_FLOAT  ("Roughness",                 roughness_scale,           1.0,      0,    1) // scales surface roughness (also in Raytracing Options)
+TWEAK_BOOL   ("Smooth Transparency",       smooth_transparency,       true)  // clean alpha edges instead of noisy dither
+TWEAK_BOOL   ("Lights Cast Shadows",       lights_cast_shadows,       true)  // light textures (is_light) block light
+TWEAK_BOOL   ("Projectiles Cast Shadows",  projectiles_cast_shadows,  true)  // weapon objects block light
 TWEAK_FLOAT  ("Override Metallic",         override_metallic,         0,        0,    1)
 TWEAK_FLOAT  ("Override Roughness",        override_roughness,        0.3,      0,    1)
 // ------------------------------------------------------------------------------------------------------------------

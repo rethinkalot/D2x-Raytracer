@@ -1,2 +1,4 @@
 blackbody = 1
 no_casting_shadow = 1
+is_light = 0
+fsr2_reactive_mask = 0

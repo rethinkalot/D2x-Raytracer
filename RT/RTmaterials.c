@@ -1,4 +1,5 @@
 #include <time.h>
+#include <io.h>
 
 // ------------------------------------------------------------------
 
@@ -20,6 +21,7 @@
 #include "gauges.h"
 #include "weapon.h"
 #include "console.h"
+#include "config.h"
 
 // ------------------------------------------------------------------
 
@@ -61,6 +63,70 @@ RT_MaterialPaths		g_rt_material_paths_default	[RT_MAX_TEXTURES];
 
 static int g_rt_last_texture_update_time = 0;
 
+// ------------------------------------------------------------------
+// Texture packs: every folder inside assets/textures/ is a pack. The loose files in
+// assets/textures/ are the Original set the game ships with and are never replaced.
+// With a pack selected, each texture and .material is taken from
+// assets/textures/<pack>/ when the pack has it, and from Original otherwise.
+
+static char g_rt_texture_pack[RT_TEXTURE_PACK_NAME_MAX]; // "" = Original only
+static bool g_rt_materials_initialized = false;
+
+static bool RT_FileExists(const char *path)
+{
+	FILE *f = fopen(path, "rb");
+	if (!f)
+		return false;
+	fclose(f);
+	return true;
+}
+
+char *RT_TexturePath(RT_Arena *arena, const char *rel)
+{
+	if (g_rt_texture_pack[0])
+	{
+		char *pack_path = RT_ArenaPrintF(arena, "assets/textures/%s/%s", g_rt_texture_pack, rel);
+		if (RT_FileExists(pack_path))
+			return pack_path;
+	}
+	return RT_ArenaPrintF(arena, "assets/textures/%s", rel);
+}
+
+const char *RT_GetTexturePack(void)
+{
+	return g_rt_texture_pack;
+}
+
+static int RT_ComparePackNames(const void *a, const void *b)
+{
+	return _stricmp((const char *)a, (const char *)b);
+}
+
+int RT_ListTexturePacks(char names[][RT_TEXTURE_PACK_NAME_MAX], int max)
+{
+	int count = 0;
+	struct _finddata_t fd;
+	intptr_t find = _findfirst("assets/textures/*", &fd);
+	if (find == -1)
+		return 0;
+	do
+	{
+		if (!(fd.attrib & _A_SUBDIR) || fd.name[0] == '.')
+			continue;
+		if (!_stricmp(fd.name, "noise")) // the renderer's own noise textures, not a pack
+			continue;
+		if (strlen(fd.name) >= RT_TEXTURE_PACK_NAME_MAX)
+			continue;
+		if (count < max)
+			snprintf(names[count++], RT_TEXTURE_PACK_NAME_MAX, "%s", fd.name);
+	} while (_findnext(find, &fd) == 0);
+	_findclose(find);
+	qsort(names, count, RT_TEXTURE_PACK_NAME_MAX, RT_ComparePackNames);
+	return count;
+}
+
+static void RT_ApplyMaterialFile(const char *material_file, RT_Material *material, RT_MaterialPaths *paths, bool *has_roughness, bool *has_metalness);
+
 static void RT_ParseMaterialDefinitionFile(int bm_index, RT_Material *material, RT_MaterialPaths *paths, 
 										   // NOTE(daniel): These are dumb, but I have to set metalness/roughness to 1 by default
 										   // if there exists a metalness/roughness map, but if the file changed the metalness/roughness
@@ -94,64 +160,22 @@ static void RT_ParseMaterialDefinitionFile(int bm_index, RT_Material *material, 
 		// in this function. Don't do it, I tell you! Just things read from
 		// the material definition file!!
 
-		char *material_file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s.material", bitmap_name);
+		// The flags below come only from .material files; clear them so the layers
+		// decide them (a key missing from every layer means off, as before).
+		material->flags &= ~(RT_MaterialFlag_BlackbodyRadiator | RT_MaterialFlag_NoCastingShadow |
+		                     RT_MaterialFlag_Light | RT_MaterialFlag_Fsr2ReactiveMask);
 
-		RT_Config cfg;
-		RT_InitializeConfig(&cfg, &g_thread_arena);
+		bool has_roughness = false, has_metalness = false;
 
-		if (RT_DeserializeConfigFromFile(&cfg, material_file))
-		{
-			RT_String string;
+		// Original first, then the selected pack on top of it.
+		RT_ApplyMaterialFile(RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s.material", bitmap_name),
+		                     material, paths, &has_roughness, &has_metalness);
+		if (g_rt_texture_pack[0])
+			RT_ApplyMaterialFile(RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s/%s.material", g_rt_texture_pack, bitmap_name),
+			                     material, paths, &has_roughness, &has_metalness);
 
-			if (RT_ConfigReadString(&cfg, RT_StringLiteral("albedo_texture"), &string))
-			{
-				RT_CopyStringToBufferNullTerm(string, sizeof(paths->albedo_texture), paths->albedo_texture);
-			}
-
-			if (RT_ConfigReadString(&cfg, RT_StringLiteral("normal_texture"), &string))
-			{
-				RT_CopyStringToBufferNullTerm(string, sizeof(paths->normal_texture), paths->normal_texture);
-			}
-
-			if (RT_ConfigReadString(&cfg, RT_StringLiteral("metalness_texture"), &string))
-			{
-				RT_CopyStringToBufferNullTerm(string, sizeof(paths->metalness_texture), paths->metalness_texture);
-			}
-
-			if (RT_ConfigReadString(&cfg, RT_StringLiteral("roughness_texture"), &string))
-			{
-				RT_CopyStringToBufferNullTerm(string, sizeof(paths->roughness_texture), paths->roughness_texture);
-			}
-
-			if (RT_ConfigReadString(&cfg, RT_StringLiteral("emissive_texture"), &string))
-			{
-				RT_CopyStringToBufferNullTerm(string, sizeof(paths->emissive_texture), paths->emissive_texture);
-			}
-
-			bool has_roughness = RT_ConfigReadFloat(&cfg, RT_StringLiteral("roughness"), &material->roughness);
-			bool has_metalness = RT_ConfigReadFloat(&cfg, RT_StringLiteral("metalness"), &material->metalness);
-			RT_ConfigReadVec3(&cfg, RT_StringLiteral("emissive_color"), &material->emissive_color);
-			RT_ConfigReadFloat(&cfg, RT_StringLiteral("emissive_strength"), &material->emissive_strength);
-
-			int blackbody = 0;
-			RT_ConfigReadInt(&cfg, RT_StringLiteral("blackbody"), &blackbody);
-			material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_BlackbodyRadiator, blackbody);
-
-			int no_casting_shadow = 0;
-			RT_ConfigReadInt(&cfg, RT_StringLiteral("no_casting_shadow"), &no_casting_shadow);
-			material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_NoCastingShadow, no_casting_shadow);
-
-			int is_light = 0;
-			RT_ConfigReadInt(&cfg, RT_StringLiteral("is_light"), &is_light);
-			material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_Light, is_light);
-
-			int fsr2_reactive_mask = 0;
-			RT_ConfigReadInt(&cfg, RT_StringLiteral("fsr2_reactive_mask"), &fsr2_reactive_mask);
-			material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_Fsr2ReactiveMask, fsr2_reactive_mask);
-
-			if (default_roughness) *default_roughness = !has_roughness;
-			if (default_metalness) *default_metalness = !has_metalness;
-		}
+		if (default_roughness) *default_roughness = !has_roughness;
+		if (default_metalness) *default_metalness = !has_metalness;
 
 		// Animated cloak and invulnerability sprites change substantially every
 		// frame. Mark them reactive so FSR does not treat their stippled/emissive
@@ -163,6 +187,47 @@ static void RT_ParseMaterialDefinitionFile(int bm_index, RT_Material *material, 
 	}
 }
 
+// Applies one .material file on top of what is already in material/paths. Only keys
+// present in the file change anything, and a blank texture path never replaces one below.
+static void RT_ApplyMaterialFile(const char *material_file, RT_Material *material, RT_MaterialPaths *paths, bool *has_roughness, bool *has_metalness)
+{
+	RT_Config cfg;
+	RT_InitializeConfig(&cfg, &g_thread_arena);
+
+	if (!RT_DeserializeConfigFromFile(&cfg, (char *)material_file))
+		return;
+
+	static const char *const texture_keys[RT_MaterialTextureSlot_COUNT] =
+	{
+		[RT_MaterialTextureSlot_Albedo]    = "albedo_texture",
+		[RT_MaterialTextureSlot_Normal]    = "normal_texture",
+		[RT_MaterialTextureSlot_Metalness] = "metalness_texture",
+		[RT_MaterialTextureSlot_Roughness] = "roughness_texture",
+		[RT_MaterialTextureSlot_Emissive]  = "emissive_texture",
+	};
+	for (size_t i = 0; i < RT_MaterialTextureSlot_COUNT; i++)
+	{
+		RT_String string;
+		if (RT_ConfigReadString(&cfg, RT_StringFromCString(texture_keys[i]), &string) && string.count > 0)
+			RT_CopyStringToBufferNullTerm(string, sizeof(paths->textures[i]), paths->textures[i]);
+	}
+
+	if (RT_ConfigReadFloat(&cfg, RT_StringLiteral("roughness"), &material->roughness)) *has_roughness = true;
+	if (RT_ConfigReadFloat(&cfg, RT_StringLiteral("metalness"), &material->metalness)) *has_metalness = true;
+	RT_ConfigReadVec3(&cfg, RT_StringLiteral("emissive_color"), &material->emissive_color);
+	RT_ConfigReadFloat(&cfg, RT_StringLiteral("emissive_strength"), &material->emissive_strength);
+
+	int value;
+	if (RT_ConfigReadInt(&cfg, RT_StringLiteral("blackbody"), &value))
+		material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_BlackbodyRadiator, value);
+	if (RT_ConfigReadInt(&cfg, RT_StringLiteral("no_casting_shadow"), &value))
+		material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_NoCastingShadow, value);
+	if (RT_ConfigReadInt(&cfg, RT_StringLiteral("is_light"), &value))
+		material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_Light, value);
+	if (RT_ConfigReadInt(&cfg, RT_StringLiteral("fsr2_reactive_mask"), &value))
+		material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_Fsr2ReactiveMask, value);
+}
+
 static void RT_VerifyMaterialTexturesFromPaths(uint16_t bm_index, RT_MaterialPaths* paths, RT_MaterialPathsExist* paths_exist, uint32_t load_mask)
 {
 	for (size_t i = 0; i < RT_MaterialTextureSlot_COUNT; i++)
@@ -172,7 +237,7 @@ static void RT_VerifyMaterialTexturesFromPaths(uint16_t bm_index, RT_MaterialPat
 			// first see if compressed dds version of the file exists
 			RT_ArenaMemoryScope(&g_thread_arena)
 			{
-				char* dds_file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s.dds", paths->textures[i]);
+				char* dds_file = RT_TexturePath(&g_thread_arena, RT_ArenaPrintF(&g_thread_arena, "%s.dds", paths->textures[i]));
 
 				FILE* f = fopen(dds_file, "r");
 
@@ -188,7 +253,7 @@ static void RT_VerifyMaterialTexturesFromPaths(uint16_t bm_index, RT_MaterialPat
 			{
 				RT_ArenaMemoryScope(&g_thread_arena)
 				{
-					char* file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s.png", paths->textures[i]);
+					char* file = RT_TexturePath(&g_thread_arena, RT_ArenaPrintF(&g_thread_arena, "%s.png", paths->textures[i]));
 
 					FILE* f = fopen(file, "r");
 
@@ -227,11 +292,11 @@ static int RT_LoadMaterialTexturesFromPaths(uint16_t bm_index, RT_Material *mate
 				// check for dds extension to already be part of texture path.
 				if (strstr(paths->textures[i], ".dds") || strstr(paths->textures[i], ".png"))
 				{
-					dds_file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s", paths->textures[i]);
+					dds_file = RT_TexturePath(&g_thread_arena, paths->textures[i]);
 				}
 				else
 				{
-					dds_file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s.dds", paths->textures[i]);
+					dds_file = RT_TexturePath(&g_thread_arena, RT_ArenaPrintF(&g_thread_arena, "%s.dds", paths->textures[i]));
 				}
 
 				// TODO(daniel): It's dumb that RT_ArenaPrintF doesn't return an RT_String
@@ -264,11 +329,11 @@ static int RT_LoadMaterialTexturesFromPaths(uint16_t bm_index, RT_Material *mate
 					// check for png extension to already be part of texture path.
 					if (strstr(paths->textures[i], ".png"))
 					{
-						file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s", paths->textures[i]);
+						file = RT_TexturePath(&g_thread_arena, paths->textures[i]);
 					}
 					else
 					{
-						file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s.png", paths->textures[i]);
+						file = RT_TexturePath(&g_thread_arena, RT_ArenaPrintF(&g_thread_arena, "%s.png", paths->textures[i]));
 					}
 
 					RT_TextureFormat format = g_rt_material_texture_slot_formats[i];
@@ -318,6 +383,10 @@ void RT_InitAllBitmaps(void)
 	// This function creates all materials for all GameBitmaps. It has no insight into
 	// the indirection of the Textures / ObjBitmaps / ObjBitmapPtrs arrays.
 	// - Daniel 01/03/2023
+
+	// The pack picked in Graphics > Use Custom Textures (descent.cfg), layered over Original.
+	snprintf(g_rt_texture_pack, sizeof(g_rt_texture_pack), "%s", GameCfg.UseCustomTextures ? GameCfg.TexturePack : "");
+	con_printf(CON_NORMAL, "Texture pack: %s\n", g_rt_texture_pack[0] ? g_rt_texture_pack : "Original only");
 
 	// define a list of textures that always need to be loaded (sprites for example that can spawn at anytime)
 	char texture_always_load_list[][13] = //{"none"};
@@ -552,6 +621,7 @@ void RT_InitAllBitmaps(void)
 	piggy_bitmap_page_out_all();
 
 	g_rt_last_texture_update_time = time(NULL);
+	g_rt_materials_initialized = true;
 }
 
 void RT_UpdatePagedIn(void)
@@ -622,7 +692,7 @@ static bool TextureFileIsOutdated(char *name)
 {
 	RT_ArenaMemoryScope(&g_thread_arena)
 	{
-		char *path = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s", name);
+		char *path = RT_TexturePath(&g_thread_arena, name);
 
 		PHYSFS_Stat stat;
 		if (PHYSFS_stat(path, &stat))
@@ -983,4 +1053,54 @@ void RT_MarkMaterialObsolete(int bm_index)
 {
 	//if (g_rt_materials[bm_index].texture_load_state == RT_MaterialTextureLoadState_Loaded)
 		g_rt_materials[bm_index].texture_load_state = RT_MaterialTextureLoadState_Obsolete;
+}
+
+// Switches the texture pack (NULL/"" = Original only). Every material is rebuilt from its
+// defaults + Original + the new pack, and whatever is loaded right now is reloaded.
+void RT_SetTexturePack(const char *name)
+{
+	if (!name)
+		name = "";
+	if (!strcmp(name, g_rt_texture_pack))
+		return;
+	snprintf(g_rt_texture_pack, sizeof(g_rt_texture_pack), "%s", name);
+	con_printf(CON_NORMAL, "Texture pack: %s\n", g_rt_texture_pack[0] ? g_rt_texture_pack : "Original only");
+
+	if (!g_rt_materials_initialized)
+		return; // RT_InitAllBitmaps reads it
+
+	for (uint16_t bm_index = 1; bm_index < MAX_BITMAP_FILES; bm_index++)
+	{
+		if (GameBitmaps[bm_index].bm_w == 0 || GameBitmaps[bm_index].bm_h == 0)
+			continue;
+
+		RT_Material *material = &g_rt_materials[bm_index];
+		const RT_Material old = *material;
+
+		// Back to the defaults, keeping what is loaded and the load bookkeeping.
+		*material = g_rt_materials_default[bm_index];
+		for (size_t i = 0; i < RT_MaterialTextureSlot_COUNT; i++)
+			material->textures[i] = old.textures[i];
+		material->texture_load_state      = old.texture_load_state;
+		material->texture_load_state_next = old.texture_load_state_next;
+		material->always_load_texture     = old.always_load_texture;
+		material->flags = (material->flags & ~RT_MaterialFlag_GameBitmap) | (old.flags & RT_MaterialFlag_GameBitmap);
+
+		g_rt_material_paths[bm_index] = g_rt_material_paths_default[bm_index];
+		memset(&g_rt_material_paths_exist[bm_index], 0, sizeof(g_rt_material_paths_exist[bm_index]));
+
+		RT_ParseMaterialDefinitionFile(bm_index, material, &g_rt_material_paths[bm_index], NULL, NULL);
+		RT_ArenaMemoryScope(&g_thread_arena)
+		{
+			RT_VerifyMaterialTexturesFromPaths(bm_index, &g_rt_material_paths[bm_index], &g_rt_material_paths_exist[bm_index], ~0u);
+		}
+
+		if (material->texture_load_state == RT_MaterialTextureLoadState_Loaded)
+			material->texture_load_state = RT_MaterialTextureLoadState_Obsolete; // reloaded below
+		else
+			RT_UpdateMaterial(bm_index, material);
+	}
+
+	RT_SyncMaterialStates();
+	g_rt_last_texture_update_time = time(NULL);
 }

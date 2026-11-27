@@ -94,6 +94,11 @@ typedef struct player_config
 	ubyte VulcanAmmoWarnings;
 	ubyte ShieldWarnings;
 	ubyte ShieldEffects;    // shield bubbles (yours and other players') and the gauge pulse
+	// Raytracer: what this pilot last used (applied on pilot select). RTCustomTextures 255 = never saved.
+	char  RTTexturePack[64];
+	char  RTRenderProfile[64];
+	ubyte RTCustomTextures;
+	ubyte SmoothTransparency;
 	ubyte UncappedTurning;
 	ubyte AutoDemoSp;
 	ubyte AutoDemoMp;

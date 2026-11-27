@@ -51,6 +51,8 @@ typedef struct Cfg
 	int Multisample;
 	int UseCustomModels;
 	int UseCustomTextures;
+	char TexturePack[64]; // raytracer: folder in assets/textures used when UseCustomTextures is on ("" = Original only)
+	char RenderProfile[64]; // raytracer: active file in assets/render_presets ("" = none picked yet)
 	// Reduced palette flash effects, in the same spirit as UseCustomModels:
 	// single player always honours it, multiplayer only when the netgame allows
 	// it, and the menu item is a check that reads "on" in both cases.

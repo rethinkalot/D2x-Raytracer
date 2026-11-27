@@ -52,17 +52,17 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 RT_DynamicLightInfo g_rt_dynamic_light_info =
 {
 	.explosionLights = true,
-	.explosionBrightMod = 50.0f,
-	.explosionRadiusMod = 1.0f,
-	.explosionTypeBias = 1.0f,
+	.explosionBrightMod = 20.412f,
+	.explosionRadiusMod = 4.0f,
+	.explosionTypeBias = 3.816f,
 
 	.weaponFlareLights = true,
-	.weaponBrightMod = 30.0f,
-	.weaponRadiusMod = 1.0f,
+	.weaponBrightMod = 127.137f,
+	.weaponRadiusMod = 0.895f,
 
 	.muzzleLights = true,
-	.muzzleBrightMod = 250.0f,
-	.muzzleRadiusMod = 1.0f,
+	.muzzleBrightMod = 36.103f,
+	.muzzleRadiusMod = 0.672f,
 };
 
 #define RT_LIGHT_ADJUST_ARRAY_SUBTRACT_OFFSET 0 //(CONCUSSION_ID)

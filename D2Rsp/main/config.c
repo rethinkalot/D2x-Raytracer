@@ -66,6 +66,8 @@ static const char VSyncStr[] ="VSync";
 static const char MultisampleStr[] ="Multisample";
 static const char CustomModelsStr[] ="CustomModels";
 static const char CustomTexturesStr[] ="CustomTextures";
+static const char TexturePackStr[] ="TexturePack";
+static const char RenderProfileStr[] ="RenderProfile";
 static const char ReducedFlashStr[] ="ReducedFlash";
 static const char ClassicDepthStr[] ="ClassicDepth";
 static const char FPSIndicatorStr[] ="FPSIndicator";
@@ -140,6 +142,8 @@ int ReadConfigFile()
 	GameCfg.Multisample = 0;
 	GameCfg.UseCustomModels = 1;
 	GameCfg.UseCustomTextures = 1;
+	GameCfg.TexturePack[0] = 0;
+	snprintf(GameCfg.RenderProfile, sizeof(GameCfg.RenderProfile), "%s", "RTXRETHINK.vars"); // first-run profile (RenderBackend.cpp)
 	// Off by default: full-strength flashes are what D1/D2 players expect unless
 	// they deliberately ask for calmer effects.
 	GameCfg.ReducedFlash = 0;
@@ -268,6 +272,22 @@ int ReadConfigFile()
 				GameCfg.UseCustomModels = strtol(value, NULL, 10);
 			else if (!strcmp(token, CustomTexturesStr))
 				GameCfg.UseCustomTextures = strtol(value, NULL, 10);
+			else if (!strcmp(token, TexturePackStr))
+			{
+				size_t n;
+				snprintf(GameCfg.TexturePack, sizeof(GameCfg.TexturePack), "%s", value);
+				n = strlen(GameCfg.TexturePack);
+				while (n && isspace((unsigned char)GameCfg.TexturePack[n - 1]))
+					GameCfg.TexturePack[--n] = 0;
+			}
+			else if (!strcmp(token, RenderProfileStr))
+			{
+				size_t n;
+				snprintf(GameCfg.RenderProfile, sizeof(GameCfg.RenderProfile), "%s", value);
+				n = strlen(GameCfg.RenderProfile);
+				while (n && isspace((unsigned char)GameCfg.RenderProfile[n - 1]))
+					GameCfg.RenderProfile[--n] = 0;
+			}
 			else if (!strcmp(token, ReducedFlashStr))
 				GameCfg.ReducedFlash = strtol(value, NULL, 10);
 			else if (!strcmp(token, ClassicDepthStr))
@@ -347,6 +367,8 @@ int WriteConfigFile()
 	PHYSFSX_printf(infile, "%s=%i\n", MultisampleStr, GameCfg.Multisample);
 	PHYSFSX_printf(infile, "%s=%i\n", CustomModelsStr, GameCfg.UseCustomModels);
 	PHYSFSX_printf(infile, "%s=%i\n", CustomTexturesStr, GameCfg.UseCustomTextures);
+	PHYSFSX_printf(infile, "%s=%s\n", TexturePackStr, GameCfg.TexturePack);
+	PHYSFSX_printf(infile, "%s=%s\n", RenderProfileStr, GameCfg.RenderProfile);
 	PHYSFSX_printf(infile, "%s=%i\n", ReducedFlashStr, GameCfg.ReducedFlash);
 	PHYSFSX_printf(infile, "%s=%i\n", ClassicDepthStr, GameCfg.ClassicDepth);
 	PHYSFSX_printf(infile, "%s=%i\n", FPSIndicatorStr, GameCfg.FPSIndicator);

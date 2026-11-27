@@ -13,21 +13,21 @@ void TraceOcclusionRay(RayDesc ray, inout OcclusionRayPayload payload, uint2 pix
 {
 #if RT_DISPATCH_RAYS
 
-    TraceRay(g_scene, RAY_FLAG_CULL_BACK_FACING_TRIANGLES | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
-        ~2, 1, 0, 1, ray, payload);
+    TraceRay(g_scene, RAY_FLAG_SKIP_CLOSEST_HIT_SHADER, // both faces: one-sided grates/fans/openings cast shadows either way
+        tweak.projectiles_cast_shadows ? ~2 : ~(2 | RT_RENDER_MASK_PROJECTILES), 1, 0, 1, ray, payload);
 
 #elif RT_INLINE_RAYTRACING
 
-    RayQuery<RAY_FLAG_CULL_BACK_FACING_TRIANGLES> ray_query;
+    RayQuery<RAY_FLAG_NONE> ray_query; // both faces: one-sided grates/fans/openings cast shadows either way
     // The lighting caller consumes visibility only, not the nearest blocker.
     // Alpha and portal validation still run before committing a nonopaque hit.
-    uint flags=RAY_FLAG_CULL_BACK_FACING_TRIANGLES;
+    uint flags=RAY_FLAG_NONE;
     if(g_global_cb.debug_flags & 0x80000000u)
         flags|=RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH;
 	ray_query.TraceRayInline(
 		g_scene,
 		flags,
-		~2,
+		tweak.projectiles_cast_shadows ? ~2 : ~(2 | RT_RENDER_MASK_PROJECTILES), // Projectiles Cast Shadows
 		ray
 	);
 
@@ -108,7 +108,8 @@ void TraceOcclusionRay(RayDesc ray, inout OcclusionRayPayload payload, uint2 pix
 					ray_query.CandidateTriangleBarycentrics(),
 					pixel_pos,
 					hit_material
-				))
+				) && !(hit_material.flags & RT_MaterialFlag_NoCastingShadow) // honour "No casting shadow" (the anyhit path already did)
+				  && (tweak.lights_cast_shadows || !(hit_material.flags & RT_MaterialFlag_Light)))
 				{
 					ray_query.CommitNonOpaqueTriangleHit();
 				}
@@ -156,7 +157,8 @@ void OcclusionAnyhit(inout OcclusionRayPayload payload, in BuiltInTriangleInters
         IgnoreHit();
     }
 
-    if (hit_material.flags & RT_MaterialFlag_NoCastingShadow)
+    if ((hit_material.flags & RT_MaterialFlag_NoCastingShadow) ||
+        (!tweak.lights_cast_shadows && (hit_material.flags & RT_MaterialFlag_Light)))
     {
         IgnoreHit();
     }

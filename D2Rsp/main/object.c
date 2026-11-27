@@ -852,6 +852,10 @@ void render_object(object *obj)
 
 	mld_save = Max_linear_depth;
 	Max_linear_depth = Max_linear_depth_objects;
+#ifdef RT_DX12
+	// Weapons go in their own ray mask so "Projectiles Cast Shadows" can switch their shadows off.
+	uint32_t rt_old_mask = RT_RaytraceSetInstanceMaskOverride(obj->type == OBJ_WEAPON ? RT_RENDER_MASK_PROJECTILES : 0);
+#endif
 
 	switch (obj->render_type)
 	{
@@ -923,6 +927,9 @@ void render_object(object *obj)
 	if ( obj->render_type != RT_NONE && Newdemo_state == ND_STATE_RECORDING )
 		newdemo_record_render_object(obj);
 
+#ifdef RT_DX12
+	RT_RaytraceSetInstanceMaskOverride(rt_old_mask);
+#endif
 	Max_linear_depth = mld_save;
 
 }

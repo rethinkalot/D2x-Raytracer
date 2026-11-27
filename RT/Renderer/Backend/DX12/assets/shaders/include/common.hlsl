@@ -89,6 +89,7 @@ static const float PI = 3.14159265359;
 #define RT_RENDER_MASK_TERRAIN 4
 #define RT_RENDER_MASK_OBJECTS 8
 #define RT_RENDER_MASK_COCKPIT 16
+#define RT_RENDER_MASK_PROJECTILES 32
 
 // @Volatile: Must match RT_Triangle in Renderer.h
 struct RT_Triangle
@@ -747,6 +748,12 @@ void GetHitMaterialAndUVs(InstanceData instance_data, RT_Triangle hit_triangle, 
 	}
 }
 
+// Glowing (blackbody) materials that cast no shadow: explosions, sparks, muzzle flashes, weapon blobs.
+bool IsEnergyEffect(Material material)
+{
+	return (material.flags & RT_MaterialFlag_BlackbodyRadiator) && (material.flags & RT_MaterialFlag_NoCastingShadow);
+}
+
 bool IsHitTransparent(uint instance_idx, uint primitive_idx, float2 barycentrics, int2 pixel_pos, inout Material material)
 {
 	InstanceData instance_data = g_instance_data_buffer[instance_idx];
@@ -844,6 +851,17 @@ bool IsHitTransparent(uint instance_idx, uint primitive_idx, float2 barycentrics
 		float4 color = UnpackRGBA(instance_data.material_color);
 		//float4 tri_color = UnpackRGBA(hit_triangle.color);
 		float dither = RandomSample(pixel_pos, instance_idx) / 2 + 0.5f;
+		// Smooth Transparency: texture alpha is a clean cutout at 50% instead of random per-pixel dither
+		// (the dither is what makes soft-edged sprites and grates look grainy). Fades such as cloaking
+		// still dither, or they would pop in and out.
+		if (tweak.smooth_transparency)
+		{
+			// Energy effects (sparks, explosions, weapon blobs) are added as soft glow along the view
+			// ray instead (AccumulateEnergyGlow in primary_ray_inline.hlsl), so they never block anything.
+			if (IsEnergyEffect(material))
+				return true;
+			return albedo.a < 0.5 || (color.a < 1.0 && dither > color.a);
+		}
 		return dither > color.a * albedo.a;
 	}
 }

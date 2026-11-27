@@ -57,4 +57,15 @@ void RT_ResetHeadLightSettings(void);
 void RT_LoadHeadLightSettings(void);
 void RT_SaveHeadLightSettings(void);
 
+// Per-profile lights: each render profile (assets/render_presets/<Name>.vars) can have its own
+// lights/<Name>/ folder. Loading uses the profile's file when it has one, else the shared lights/ file.
+struct RT_Arena;
+const char *RT_LightsProfile(void);                                    // "" = shared only
+void  RT_SetLightsProfileName(const char *render_profile);             // just the name ("X.vars" or "X")
+char *RT_LightsLoadPath(struct RT_Arena *arena, const char *file);    // lights/<profile>/<file> if present, else lights/<file>
+char *RT_LightsSavePath(struct RT_Arena *arena, const char *file);    // where the next save goes (see below)
+void  RT_SetLightsSaveTarget(const char *profile);                     // NULL = current profile, "" = shared
+bool  RT_LightsSaveToProfilePopup(const char *popup_id);               // "Save to profile:" popup; true once one is picked
+void  RT_SetLightsProfile(const char *render_profile);                 // RTgr.c: switch + reload all light settings
+
 #endif

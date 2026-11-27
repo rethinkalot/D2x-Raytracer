@@ -7,6 +7,9 @@
 #include "RTgr.h"
 #include "RTmaterials.h"
 #include "console.h"
+#include "config.h"
+#include <io.h>
+#include <direct.h>
 
 #include "Core/Arena.h"
 #include "Core/Config.h"
@@ -285,10 +288,131 @@ static RT_HeadlightSettings g_default_headlights = {
 	.skew_horz       = 0.1f,
 	.skew_vert       = 0.06f,
 	.radius          = 0.05f,
-	.brightness      = 1.5f,
+	.brightness      = 1.4f,
 	.spot_angle      = 0.05f,
 	.spot_softness   = 0.05f,
 };
+
+// ------------------------------------------------------------------
+// Per-profile lights (see Lights.h)
+
+static char g_rt_lights_profile[64];
+static bool g_rt_lights_profile_set;
+static char g_rt_lights_save_target[64];
+static bool g_rt_lights_save_target_set;
+
+static void RT_LightsProfileFromName(char *out, size_t out_size, const char *render_profile)
+{
+	size_t len;
+	snprintf(out, out_size, "%s", render_profile ? render_profile : "");
+	len = strlen(out);
+	if (len > 5 && !_stricmp(out + len - 5, ".vars"))
+		out[len - 5] = 0;
+}
+
+const char *RT_LightsProfile(void)
+{
+	if (!g_rt_lights_profile_set)
+	{
+		RT_LightsProfileFromName(g_rt_lights_profile, sizeof(g_rt_lights_profile), GameCfg.RenderProfile);
+		g_rt_lights_profile_set = true;
+	}
+	return g_rt_lights_profile;
+}
+
+void RT_SetLightsProfileName(const char *render_profile)
+{
+	RT_LightsProfileFromName(g_rt_lights_profile, sizeof(g_rt_lights_profile), render_profile);
+	g_rt_lights_profile_set = true;
+}
+
+char *RT_LightsLoadPath(RT_Arena *arena, const char *file)
+{
+	const char *profile = RT_LightsProfile();
+	if (profile[0])
+	{
+		char *path = RT_ArenaPrintF(arena, "lights/%s/%s", profile, file);
+		FILE *f = fopen(path, "rb");
+		if (f)
+		{
+			fclose(f);
+			return path;
+		}
+	}
+	return RT_ArenaPrintF(arena, "lights/%s", file);
+}
+
+char *RT_LightsSavePath(RT_Arena *arena, const char *file)
+{
+	const char *target = g_rt_lights_save_target_set ? g_rt_lights_save_target : RT_LightsProfile();
+	_mkdir("lights");
+	if (target[0])
+	{
+		_mkdir(RT_ArenaPrintF(arena, "lights/%s", target));
+		return RT_ArenaPrintF(arena, "lights/%s/%s", target, file);
+	}
+	return RT_ArenaPrintF(arena, "lights/%s", file);
+}
+
+void RT_SetLightsSaveTarget(const char *profile)
+{
+	g_rt_lights_save_target_set = profile != NULL;
+	if (profile)
+		RT_LightsProfileFromName(g_rt_lights_save_target, sizeof(g_rt_lights_save_target), profile);
+}
+
+bool RT_LightsSaveToProfilePopup(const char *popup_id)
+{
+	bool picked = false;
+	if (igBeginPopup(popup_id, 0))
+	{
+		struct _finddata_t fd;
+		intptr_t find;
+
+		// Top line: the profile you're on, one click to save to it.
+		if (RT_LightsProfile()[0])
+		{
+			char current_label[128];
+			snprintf(current_label, sizeof(current_label), "Save to profile: %s (current)", RT_LightsProfile());
+			if (igSelectable_Bool(current_label, false, 0, (ImVec2){0, 0}))
+			{
+				RT_SetLightsSaveTarget(RT_LightsProfile());
+				picked = true;
+				igCloseCurrentPopup();
+			}
+		}
+		else
+		{
+			igTextUnformatted("Save to profile:", NULL);
+		}
+		igSeparator();
+		find = _findfirst("assets/render_presets/*.vars", &fd);
+		if (find != -1)
+		{
+			do
+			{
+				char name[64];
+				RT_LightsProfileFromName(name, sizeof(name), fd.name);
+				if (igSelectable_Bool(name, false, 0, (ImVec2){0, 0}))
+				{
+					RT_SetLightsSaveTarget(name);
+					picked = true;
+					igCloseCurrentPopup();
+				}
+			} while (_findnext(find, &fd) == 0);
+			_findclose(find);
+		}
+		igSeparator();
+		if (igSelectable_Bool("Shared (all profiles)", false, 0, (ImVec2){0, 0}))
+		{
+			RT_SetLightsSaveTarget("");
+			picked = true;
+			igCloseCurrentPopup();
+		}
+		igEndPopup();
+	}
+	return picked;
+}
 
 void RT_InitLightStuff()
 {
@@ -304,7 +428,7 @@ void RT_InitLightStuff()
 
 void RT_ResetLightSettings()
 {
-	g_light_multiplier_default = g_light_multiplier = 1.0f;
+	g_light_multiplier_default = g_light_multiplier = 1.419883f; // shipped default (global_lights.vars overrides)
 
 	memcpy(g_light_definitions, g_default_light_definitions, sizeof(g_default_light_definitions));
 	g_pending_light_update = true;
@@ -411,7 +535,12 @@ void RT_ShowLightMenu()
 
 		if (igButton("Save Settings", (ImVec2){0, 0}))
 		{
+			igOpenPopup_Str("SaveHeadlightsTo", 0);
+		}
+		if (RT_LightsSaveToProfilePopup("SaveHeadlightsTo"))
+		{
 			RT_SaveHeadLightSettings();
+			RT_SetLightsSaveTarget(NULL);
 		}
 
 		igSameLine(0.0f, -1.0f);
@@ -447,7 +576,12 @@ void RT_ShowLightMenu()
 
 	if (igButton("Save Settings", (ImVec2){0, 0}))
 	{
+		igOpenPopup_Str("SaveLevelLightsTo", 0);
+	}
+	if (RT_LightsSaveToProfilePopup("SaveLevelLightsTo"))
+	{
 		RT_SaveLightSettings();
+		RT_SetLightsSaveTarget(NULL);
 	}
 
 	igSameLine(0.0f, -1.0f);
@@ -567,7 +701,7 @@ void RT_LoadLightSettings()
 		RT_Config *cfg = RT_ArenaAllocStruct(&g_thread_arena, RT_Config);
 		RT_InitializeConfig(cfg, &g_thread_arena);
 
-		if (RT_DeserializeConfigFromFile(cfg, "lights/global_lights.vars"))
+		if (RT_DeserializeConfigFromFile(cfg, RT_LightsLoadPath(&g_thread_arena, "global_lights.vars")))
 		{
 			RT_ConfigReadFloat(cfg, RT_StringLiteral("global_light_multiplier"), &g_light_multiplier_default);
 			g_light_multiplier = g_light_multiplier_default;
@@ -590,7 +724,7 @@ void RT_LoadLightSettings()
 			RT_Config *cfg = RT_ArenaAllocStruct(&g_thread_arena, RT_Config);
 			RT_InitializeConfig(cfg, &g_thread_arena);
 
-			char *file_name = RT_ArenaPrintF(&g_thread_arena, "lights/%s.vars", def->name);
+			char *file_name = RT_LightsLoadPath(&g_thread_arena, RT_ArenaPrintF(&g_thread_arena, "%s.vars", def->name));
 			if (RT_DeserializeConfigFromFile(cfg, file_name))
 			{
 				RT_ConfigReadInt(cfg, RT_StringLiteral("kind"), &def->kind);
@@ -635,7 +769,7 @@ void RT_SaveLightSettings()
 
 		RT_ConfigWriteFloat(cfg, RT_StringLiteral("global_light_multiplier"), g_light_multiplier_default);
 
-		if (!RT_SerializeConfigToFile(cfg, "lights/global_lights.vars"))
+		if (!RT_SerializeConfigToFile(cfg, RT_LightsSavePath(&g_thread_arena, "global_lights.vars")))
 		{
 			success = false;
 
@@ -666,7 +800,7 @@ void RT_SaveLightSettings()
 			RT_ConfigWriteFloat(cfg, RT_StringLiteral("spot_angle"), def->spot_angle);
 			RT_ConfigWriteFloat(cfg, RT_StringLiteral("spot_softness"), def->spot_softness);
 
-			char *file_name = RT_ArenaPrintF(&g_thread_arena, "lights/%s.vars", def->name);
+			char *file_name = RT_LightsSavePath(&g_thread_arena, RT_ArenaPrintF(&g_thread_arena, "%s.vars", def->name));
 			if (!RT_SerializeConfigToFile(cfg, file_name))
 			{
 				success = false;
@@ -705,7 +839,7 @@ void RT_LoadHeadLightSettings(void)
 		RT_Config *cfg = RT_ArenaAllocStruct(&g_thread_arena, RT_Config);
 		RT_InitializeConfig(cfg, &g_thread_arena);
 
-		if (RT_DeserializeConfigFromFile(cfg, "lights/headlights.vars"))
+		if (RT_DeserializeConfigFromFile(cfg, RT_LightsLoadPath(&g_thread_arena, "headlights.vars")))
 		{
 			RT_ConfigReadFloat(cfg, RT_StringLiteral("pos_offset_horz"), &g_headlights.pos_offset_horz);
 			RT_ConfigReadFloat(cfg, RT_StringLiteral("pos_offset_vert"), &g_headlights.pos_offset_vert);
@@ -752,7 +886,7 @@ void RT_SaveHeadLightSettings(void)
 		RT_ConfigWriteFloat(cfg, RT_StringLiteral("spot_angle"), g_headlights.spot_angle);
 		RT_ConfigWriteFloat(cfg, RT_StringLiteral("spot_softness"), g_headlights.spot_softness);
 
-		if (!RT_SerializeConfigToFile(cfg, "lights/headlights.vars"))
+		if (!RT_SerializeConfigToFile(cfg, RT_LightsSavePath(&g_thread_arena, "headlights.vars")))
 		{
 			success = false;
 

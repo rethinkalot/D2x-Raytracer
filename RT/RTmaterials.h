@@ -55,4 +55,13 @@ RT_API RT_MaterialPathsExist g_rt_material_paths_exist[RT_MAX_TEXTURES];    // r
 RT_API RT_Material      g_rt_materials_default     [RT_MAX_TEXTURES];
 RT_API RT_MaterialPaths g_rt_material_paths_default[RT_MAX_TEXTURES];
 
+// Texture packs: every folder inside assets/textures/ is a pack; the loose files there are
+// the Original set. One pack at a time is layered over Original (see RTmaterials.c).
+#define RT_TEXTURE_PACK_NAME_MAX 64
+struct RT_Arena;
+RT_API char *RT_TexturePath(struct RT_Arena *arena, const char *rel); // pack file if the pack has it, else Original
+RT_API const char *RT_GetTexturePack(void);                         // "" = Original only
+RT_API int  RT_ListTexturePacks(char names[][RT_TEXTURE_PACK_NAME_MAX], int max); // sorted folder names
+RT_API void RT_SetTexturePack(const char *name);                    // NULL/"" = Original only; reloads materials
+
 #pragma pack(pop)

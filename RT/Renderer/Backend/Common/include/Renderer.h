@@ -27,6 +27,7 @@
 #define RT_RENDER_MASK_TERRAIN (4)
 #define RT_RENDER_MASK_OBJECTS (8)
 #define RT_RENDER_MASK_COCKPIT (16)
+#define RT_RENDER_MASK_PROJECTILES (32) // weapon objects (Projectiles Cast Shadows)
 // OR this in for triangle->material_edge_index for poly objects and have them
 // skip the material edges array...
 #define RT_TRIANGLE_HOLDS_MATERIAL_EDGE  (1 << 31)
@@ -141,6 +142,10 @@ typedef struct RT_RendererIO
 
 	// out:
 	bool frame_frozen;
+
+	// in: the render profile the game is on (file name in assets/render_presets, "" = none yet),
+	// shown at the top of the Save Settings "Save to profile:" popup.
+	char active_profile[64];
 } RT_RendererIO;
 
 static char g_rt_texture_format_bpp[] =
@@ -382,6 +387,8 @@ RT_API int RT_CheckWindowMinimized(void);
 // Raytracing functions
 
 RT_API uint32_t RT_RaytraceSetRenderFlagsOverride(uint32_t flags);
+// Instance mask for objects submitted until reset (0 = normal objects); returns the previous one.
+RT_API uint32_t RT_RaytraceSetInstanceMaskOverride(uint32_t mask);
 RT_API void RT_RaytraceMeshEx(RT_RenderMeshParams* render_mesh_params);
 RT_API void RT_RaytraceMeshColor(RT_ResourceHandle mesh, RT_Vec4 color, const RT_Mat4* transform, const RT_Mat4* prev_transform);
 RT_API void RT_RaytraceMesh(RT_ResourceHandle mesh, const RT_Mat4* transform, const RT_Mat4* prev_transform);

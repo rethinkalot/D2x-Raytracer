@@ -170,6 +170,10 @@ int new_player_config()
 	PlayerCfg.ShowVelocityMeter = 1;
 	PlayerCfg.PreferMyTeamColors = 0;
 	PlayerCfg.ShieldEffects = 1;
+	PlayerCfg.RTTexturePack[0] = 0;
+	PlayerCfg.RTRenderProfile[0] = 0;
+	PlayerCfg.RTCustomTextures = 255;
+	PlayerCfg.SmoothTransparency = 1;
 	PlayerCfg.UncappedTurning = 0;
 	PlayerCfg.QuietPlasma = 1; 
 	PlayerCfg.maxFps = GameArg.SysMaxFPS; 
@@ -219,6 +223,21 @@ int new_player_config()
 	
 	return 1;
 }
+
+// A name value from the .plx (texture pack, render profile), trailing whitespace trimmed.
+static void playsave_read_name(char *out, size_t out_size, const char *line)
+{
+	size_t n;
+	snprintf(out, out_size, "%s", line);
+	n = strlen(out);
+	while (n && isspace((unsigned char)out[n - 1]))
+		out[--n] = 0;
+}
+
+#ifdef RT_DX12
+void RT_SyncPilotRenderSettings(void);  // menu.c: current pack/profile/transparency -> PlayerCfg
+void RT_ApplyPilotRenderSettings(void); // menu.c: PlayerCfg -> pack/profile/transparency
+#endif
 
 int read_player_d2x(char *filename)
 {
@@ -476,6 +495,14 @@ int read_player_d2x(char *filename)
 					PlayerCfg.ShowVelocityMeter = atoi(line);
 				if(!strcmp(word,"SHIELDEFFECTS"))
 					PlayerCfg.ShieldEffects = atoi(line);
+				if(!strcmp(word,"RTTEXTUREPACK"))
+					playsave_read_name(PlayerCfg.RTTexturePack, sizeof(PlayerCfg.RTTexturePack), line);
+				if(!strcmp(word,"RTPROFILE"))
+					playsave_read_name(PlayerCfg.RTRenderProfile, sizeof(PlayerCfg.RTRenderProfile), line);
+				if(!strcmp(word,"RTCUSTOMTEXTURES"))
+					PlayerCfg.RTCustomTextures = atoi(line);
+				if(!strcmp(word,"SMOOTHTRANSPARENCY"))
+					PlayerCfg.SmoothTransparency = atoi(line);
 				if(!strcmp(word,"UNCAPPEDTURNING"))
 					PlayerCfg.UncappedTurning = atoi(line);
 				if(!strcmp(word,"MOUSETURNLIMITX"))
@@ -779,6 +806,13 @@ int write_player_d2x(char *filename)
 		PHYSFSX_printf(fout,"showspeedruntimers=%i\n",PlayerCfg.ShowSpeedrunTimers);
 		PHYSFSX_printf(fout,"showvelocitymeter=%i\n",PlayerCfg.ShowVelocityMeter);
 		PHYSFSX_printf(fout,"shieldeffects=%i\n",PlayerCfg.ShieldEffects);
+#ifdef RT_DX12
+		RT_SyncPilotRenderSettings();
+#endif
+		PHYSFSX_printf(fout,"rttexturepack=%s\n",PlayerCfg.RTTexturePack);
+		PHYSFSX_printf(fout,"rtprofile=%s\n",PlayerCfg.RTRenderProfile);
+		PHYSFSX_printf(fout,"rtcustomtextures=%i\n",PlayerCfg.RTCustomTextures);
+		PHYSFSX_printf(fout,"smoothtransparency=%i\n",PlayerCfg.SmoothTransparency);
 		PHYSFSX_printf(fout,"uncappedturning=%i\n",PlayerCfg.UncappedTurning);
 		PHYSFSX_printf(fout,"mouseturnlimitx=%d\n",PlayerCfg.MouseTurnLimit[0]);
 		PHYSFSX_printf(fout,"mouseturnlimity=%d\n",PlayerCfg.MouseTurnLimit[1]);
@@ -1082,6 +1116,9 @@ int read_player_file()
 	strcat(filename, ".plx");
 	read_player_d2x(filename);
 	kc_set_controls();
+#ifdef RT_DX12
+	RT_ApplyPilotRenderSettings(); // this pilot's texture pack, render profile and transparency
+#endif
 
 	return EZERO;
 

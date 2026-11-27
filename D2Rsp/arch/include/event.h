@@ -77,6 +77,7 @@ void event_send(d_event *event);
 void event_process();
 
 void event_toggle_focus(int activate_focus);
+void event_refresh_grab(void);
 
 // See how long we were idle for
 void event_reset_idle_seconds();

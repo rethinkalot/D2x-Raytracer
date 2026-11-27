@@ -5,6 +5,35 @@
 #include "primary_ray.hlsli"
 #include "portal_retrace_ray.hlsl"
 
+// Smooth Transparency: every energy effect between the camera and the surface adds its color as
+// light (alpha-weighted, like additive sprites), so explosions keep soft edges and dark pixels add
+// nothing. Additive, so the order the hits come back in doesn't matter.
+float3 AccumulateEnergyGlow(RayDesc ray, float max_t)
+{
+	float3 glow = 0;
+	ray.TMax = max_t;
+	RayQuery<RAY_FLAG_NONE> q;
+	q.TraceRayInline(g_scene, RAY_FLAG_NONE, RT_RENDER_MASK_OBJECTS | RT_RENDER_MASK_PROJECTILES, ray);
+	while (q.Proceed())
+	{
+		if (q.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE)
+			continue;
+		InstanceData instance = g_instance_data_buffer[q.CandidateInstanceIndex()];
+		RT_Triangle tri = GetHitTriangle(instance.triangle_buffer_idx, q.CandidatePrimitiveIndex());
+		uint material_index = 0;
+		float2 uv = 0;
+		float3 normal = 0, tangent = 0;
+		GetHitMaterialAndUVs(instance, tri, q.CandidateTriangleBarycentrics(), material_index, uv, normal, tangent);
+		Material material = g_materials[material_index];
+		if (!IsEnergyEffect(material))
+			continue;
+		float4 texel = GetTextureFromIndex(material.albedo_index).SampleLevel(g_sampler_linear_wrap, uv, 0);
+		float4 color_mod = UnpackRGBA(instance.material_color) * UnpackRGBA(tri.color);
+		glow += texel.rgb * texel.a * color_mod.rgb * color_mod.a * UnpackRGBE(material.emissive_factor);
+	}
+	return glow;
+}
+
 [numthreads(GROUP_X, GROUP_Y, 1)]
 void PrimaryRayInline(COMPUTE_ARGS)
 {
@@ -98,6 +127,12 @@ void PrimaryRayInline(COMPUTE_ARGS)
 		payload.instance_idx, payload.primitive_idx, payload.barycentrics, payload.hit_distance,
 		0, pixel_pos, g_global_cb.render_dim, geo
 	);
+
+#ifndef VR_HYBRID_VISIBILITY
+	// Energy effects in front of the world surface (not over the cockpit).
+	if (tweak.smooth_transparency && cockpit_payload.instance_idx == ~0)
+		geo.emissive += AccumulateEnergyGlow(ray, payload.instance_idx != ~0 ? payload.hit_distance : RT_RAY_T_MAX);
+#endif
 
 	// Keep the cockpit's authored material response. Bright-light protection
 	// is applied during composition without flattening normal-map detail.
