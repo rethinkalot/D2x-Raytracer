@@ -12,13 +12,9 @@
 #include <stdio.h>
 #include <string.h>
 
-#include <SDL/SDL.h>
-#include <SDL/SDL_audio.h>
-#if !(defined(__APPLE__) && defined(__MACH__))
-#include <SDL/SDL_mixer.h>
-#else
-#include <SDL_mixer/SDL_mixer.h>
-#endif
+#include <SDL.h>
+#include <SDL_audio.h>
+#include <SDL_mixer.h>
 
 #include "pstypes.h"
 #include "dxxerror.h"
@@ -39,24 +35,43 @@
 #define MIX_OUTPUT_CHANNELS	2
 
 #define MAX_SOUND_SLOTS 64
-#if !((defined(__APPLE__) && defined(__MACH__)) || defined(macintosh))
-#define SOUND_BUFFER_SIZE 2048
-#else
-#define SOUND_BUFFER_SIZE 1024
-#endif
+#define SOUND_BUFFER_SIZE 2048 // about 46 ms at 44.1 kHz
 #define MIN_VOLUME 10
 
 static int digi_initialised = 0;
 static int digi_max_channels = MAX_SOUND_SLOTS;
-static inline int fix2byte(fix f) { return (f / 256) % 256; }
+static inline int fix2byte(fix f) { return f < 0 ? 0 : f >= 65536 ? 255 : f / 256; }
 Mix_Chunk SoundChunks[MAX_SOUNDS];
 ubyte channels[MAX_SOUND_SLOTS];
+
+#ifdef __linux__
+static int digi_mixer_check_soundfont(const char *path, void *data)
+{
+	FILE *file = fopen(path, "r");
+	if (!file)
+		return 0;
+	fclose(file);
+	return 1;
+}
+#endif
 
 /* Initialise audio */
 int digi_mixer_init()
 {
 	if (MIX_DIGI_DEBUG) con_printf(CON_DEBUG,"digi_init %d (SDL_Mixer)\n", MAX_SOUNDS);
 	if (SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) Error("SDL audio initialisation failed: %s.", SDL_GetError());
+
+	#ifdef __linux__
+	// Use the soundfont in the AppImage if no other sound font specified
+	Mix_Init(0); // hack to set soundfont_paths on Debian patched SDL-mixer
+	if (!Mix_EachSoundFont(digi_mixer_check_soundfont, NULL) && getenv("APPDIR"))
+	{
+		char soundfonts[PATH_MAX];
+		snprintf(soundfonts, sizeof(soundfonts),
+			"%s/usr/share/sounds/sf3/default-GM.sf3", getenv("APPDIR"));
+		Mix_SetSoundFonts(soundfonts);
+	}
+	#endif
 
 	if (Mix_OpenAudio(SAMPLE_RATE_44K, MIX_OUTPUT_FORMAT, MIX_OUTPUT_CHANNELS, SOUND_BUFFER_SIZE))
 	{
@@ -128,7 +143,7 @@ void mixdigi_convert_sound(int i)
 		if (SDL_ConvertAudio(&cvt)) con_printf(CON_DEBUG,"conversion of %d failed\n", i);
 
 		SoundChunks[i].abuf = cvt.buf;
-		SoundChunks[i].alen = dlen * cvt.len_mult;
+		SoundChunks[i].alen = cvt.len_cvt;
 		SoundChunks[i].allocated = 1;
 		SoundChunks[i].volume = 128; // Max volume = 128
 	}
@@ -150,6 +165,8 @@ int digi_mixer_start_sound(short soundnum, fix volume, int pan, int looping, int
 	if (MIX_DIGI_DEBUG) con_printf(CON_DEBUG,"digi_start_sound %d, volume %d, pan %d (start=%d, end=%d)\n", soundnum, mix_vol, mix_pan, loop_start, loop_end);
 
 	channel = digi_mixer_find_channel();
+	if (channel == -1)
+		return -1;
 
 	Mix_PlayChannel(channel, &(SoundChunks[soundnum]), mix_loop);
 	Mix_SetPanning(channel, 255-mix_pan, mix_pan);

@@ -8,7 +8,7 @@
 #include <string.h>
 #include <limits.h>
 #include <math.h>
-#include <SDL/SDL.h>
+#include <SDL.h>
 #include "gr.h"
 #include "grdef.h"
 #include "palette.h"
@@ -40,6 +40,15 @@ void gr_flip()
 void gr_set_draw_buffer(int buf)
 {
 	buf = buf;
+}
+
+// Returns non-zero only when the backend can actually turn vsync on and off.
+// SDL 1.2 has no swap-interval control and no way to query the current state,
+// so the Graphics Options menu hides the VSync entry on this backend rather than
+// presenting a control that cannot reach the driver.
+int gr_vsync_supported(void)
+{
+	return 0;
 }
 
 // returns possible (fullscreen) resolutions if any.
@@ -98,8 +107,10 @@ int gr_set_mode(u_int32_t mode)
 	h=SM_H(mode);
 	screen=NULL;
 
+	sdl_video_flags = (sdl_video_flags & ~SDL_NOFRAME) | (GameCfg.BorderlessWindow ? SDL_NOFRAME : 0);
+
 	SDL_WM_SetCaption(DESCENT_VERSION, "Descent II");
-	SDL_WM_SetIcon( SDL_LoadBMP( "d2x-rebirth.bmp" ), NULL );
+	SDL_WM_SetIcon( SDL_LoadBMP( "d2x-redux.bmp" ), NULL );
 
 	if(SDL_VideoModeOK(w,h,GameArg.DbgBpp,sdl_video_flags))
 	{
@@ -171,6 +182,9 @@ int gr_init(int mode)
 	// Only do this function once!
 	if (gr_installed==1)
 		return -1;
+
+	// Make SDL_Delay accurate enough for frame caps above 60 FPS on Windows.
+	timer_set_high_res();
 
 	if (SDL_Init(SDL_INIT_VIDEO) < 0)
 	{

@@ -860,8 +860,6 @@ int fvi_sub(vms_vector *intp,int *ints,vms_vector *p0,int startseg,vms_vector *p
 						closest_d = d;
 						closest_hit_point = hit_point;
 						hit_type=HIT_OBJECT;
-
-						con_printf(CON_DEBUG, "fvi.c: hit_type = HIT_OBJECT\n"); 
 					}
 			}
 
@@ -923,7 +921,7 @@ int fvi_sub(vms_vector *intp,int *ints,vms_vector *p0,int startseg,vms_vector *p
 
 						//if what we have hit is a door, check the adjoining seg
 
-						if ( (thisobjnum == Players[Player_num].objnum) && (cheats.ghostphysics) )	{
+						if ( (thisobjnum == Players[Player_num].objnum) && (cheats.ghostphysics || is_observer()) )	{
 							wid_flag = WALL_IS_DOORWAY(seg, side);
 							if (seg->children[side] >= 0 )
  								wid_flag |= WID_FLY_FLAG;

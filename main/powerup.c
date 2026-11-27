@@ -52,6 +52,9 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "editor/editor.h"
 #endif
 #include "playsave.h"
+#ifdef OGL
+#include "xmodel.h"
+#endif
 
 int N_powerup_types = 0;
 powerup_type_info Powerup_info[MAX_POWERUP_TYPES];
@@ -114,6 +117,80 @@ void draw_blob_outline(void)
 
 void draw_powerup(object *obj)
 {
+#ifdef OGL
+	if (GameCfg.UseCustomModels && (!(Game_mode & GM_MULTI) || Netgame.AllowCustomModelsTextures) &&
+		xmodel_exists(XM_POWERUP, obj->id)) {
+		vms_matrix orient;
+		vms_angvec angles;
+		fix light = F1_0;
+		g3s_lrgb lrgb = { light, light, light };
+		int vclip_num = obj->rtype.vclip_info.vclip_num;
+
+		if (obj->id == POW_EXTRA_LIFE || obj->id == POW_ENERGY ||
+			obj->id == POW_SHIELD_BOOST || obj->id == POW_CLOAK ||
+			obj->id == POW_INVULNERABILITY)
+		{
+			// Shield rides at a fixed 44-degree vertical tilt (same as D1) so its
+			// bolt ring reads diagonal while it yaws; the rest of this group
+			// stays level.
+			if (obj->id == POW_SHIELD_BOOST)
+				angles.p = F1_0 * 44 / 360;
+			else
+				angles.p = 0;
+		}
+		else if (obj->id == POW_QUAD_FIRE)
+			angles.p = F1_0 / 12;
+		else if (obj->id == POW_GAUSS_WEAPON)
+			angles.p = -F1_0 * 103 / 360;
+		else if (obj->id == POW_PHOENIX_WEAPON)
+		{
+			// Phoenix: p = 13°, b = 0° — perfect, leave untouched.
+			angles.p = F1_0 * 13 / 360;
+		}
+		else if (obj->id == POW_SUPER_LASER)
+		{
+			// Super Laser: ASE is authored barrel-up at p=0; p=90° lays the
+			// barrel horizontal (correct face up), then back off 30° so the
+			// barrel points up at a 30° angle.
+			angles.p = F1_0 * 60 / 360;
+		}
+		else if (obj->id == POW_AFTERBURNER)
+		{
+			// Afterburner sits tilted with red side facing player; tip ~90�
+			// up then flatten by ~13� so red faces up, then roll 180�
+			// around long axis to swap brown top <-> colors bottom.
+			// Heading offset 45� added for proper orientation.
+			angles.p = F1_0 * 77 / 360;
+			angles.b = F1_0 * 180 / 360;
+		}
+		else if (obj->id == POW_OMEGA_WEAPON)
+		{
+			// omega.ase is authored upside down; final nudge: back to 65,
+			// then up 4 -> 69 to match plasma tilt.
+			angles.p = F1_0 * 69 / 360;
+		}
+		else
+			angles.p = obj->id == POW_LASER ||
+				(obj->id >= POW_VULCAN_WEAPON && obj->id <= POW_FUSION_WEAPON) ?
+				F1_0 / 4 - F1_0 / 20 : F1_0 * 7 / 8;
+		if (obj->id != POW_AFTERBURNER)
+			angles.b = 0;
+		fix64 rotation_duration = (fix64)Vclip[vclip_num].num_frames * Vclip[vclip_num].frame_time;
+		if (obj->id == POW_SHIELD_BOOST || obj->id == POW_CLOAK ||
+			obj->id == POW_EXTRA_LIFE || obj->id == POW_INVULNERABILITY)
+			rotation_duration = rotation_duration * 100 / 65;
+		else if (obj->id == POW_PROXIMITY_WEAPON || obj->id == POW_SMART_MINE)
+			rotation_duration *= 2;
+		angles.h = (fixang)(GameTime64 * F1_0 / rotation_duration);
+		if (obj->id == POW_AFTERBURNER)
+			angles.h += F1_0 * 225 / 360;
+		vm_angles_2_matrix(&orient, &angles);
+
+		if (xmodel_show_if_loaded(XM_POWERUP, obj->id, &obj->pos, &orient, -1, &lrgb))
+			return;
+	}
+#endif
+
 	#ifdef EDITOR
 	blob_vertices[0] = 0x80000;
 	#endif
@@ -133,10 +210,14 @@ void powerup_basic(int redadd, int greenadd, int blueadd, int score, const char 
 	va_list	args;
 
 	va_start(args, format );
-	HUD_init_message_va(HM_DEFAULT, format, args);
+	// Pickup lines are classed HM_REDUNDANT so "No redundant pickup messages"
+	// suppresses them wholesale (SP and MP). Guide-Bot uses buddy_message() and
+	// warnings use their own HM_MULTI messages, so both are unaffected here.
+	HUD_init_message_va(HM_DEFAULT|HM_REDUNDANT, format, args);
 	va_end(args);
 
-	PALETTE_FLASH_ADD(redadd,greenadd,blueadd);
+	if (!reduced_flash_wanted())
+		PALETTE_FLASH_ADD(redadd,greenadd,blueadd);
 
 	add_points_to_score(score);
 
@@ -193,6 +274,9 @@ int pick_up_energy(void)
 			Players[Player_num].energy = MAX_ENERGY;
 		powerup_basic(15,15,7, ENERGY_SCORE, "%s %s %d",TXT_ENERGY,TXT_BOOSTED_TO,f2ir(Players[Player_num].energy));
 		used=1;
+
+		if (Game_mode & GM_MULTI)
+			multi_send_ship_status();
 	} else
 		HUD_init_message(HM_DEFAULT|HM_REDUNDANT|HM_MAYDUPL, TXT_MAXED_OUT,TXT_ENERGY);
 
@@ -203,7 +287,7 @@ int pick_up_vulcan_ammo(void)
 {
 	int	used=0,max;
 
-	int	pwsave = Primary_weapon;		// Ugh, save selected primary weapon around the picking up of the ammo.  I apologize for this code.  Matthew A. Toschlog
+	int	pwsave = Players[Player_num].primary_weapon;		// Ugh, save selected primary weapon around the picking up of the ammo.  I apologize for this code.  Matthew A. Toschlog
 	if (pick_up_ammo(CLASS_PRIMARY, VULCAN_INDEX, VULCAN_AMMO_AMOUNT)) {
 		VulcanAmmoBoxesOnBoard[Player_num] += 1; 
 		VulcanBoxAmmo[Player_num] += VULCAN_AMMO_AMOUNT;
@@ -216,7 +300,7 @@ int pick_up_vulcan_ammo(void)
 		HUD_init_message(HM_DEFAULT|HM_REDUNDANT|HM_MAYDUPL, "%s %d %s!",TXT_ALREADY_HAVE,f2i((unsigned) VULCAN_AMMO_SCALE * (unsigned) max),TXT_VULCAN_ROUNDS);
 		used = 0;
 	}
-	Primary_weapon = pwsave;
+	Players[Player_num].primary_weapon = pwsave;
 
 	return used;
 }
@@ -278,10 +362,16 @@ int do_powerup(object *obj)
 				fix boost = 3*F1_0 + 3*F1_0*(NDL - Difficulty_level);
 				if (Difficulty_level == 0)
 					boost += boost/2;
+
+				if (Game_mode & GM_MULTI)
+					multi_send_repair(boost, Players[Player_num].shields, OBJ_POWERUP);
+
 				Players[Player_num].shields += boost;
 				if (Players[Player_num].shields > MAX_SHIELDS)
 					Players[Player_num].shields = MAX_SHIELDS;
 				powerup_basic(0, 0, 15, SHIELD_SCORE, "%s %s %d",TXT_SHIELD,TXT_BOOSTED_TO,f2ir(Players[Player_num].shields));
+				if (Game_mode & GM_MULTI && PlayerCfg.MultiMessages)
+					con_printf(CON_NORMAL, "You picked up %.1f shields, shields now %.1f\n", f2fl(boost), f2fl(Players[Player_num].shields));
 				used=1;
 			} else
 				HUD_init_message(HM_DEFAULT|HM_REDUNDANT|HM_MAYDUPL, TXT_MAXED_OUT,TXT_SHIELD);
@@ -294,10 +384,14 @@ int do_powerup(object *obj)
 				if (Newdemo_state == ND_STATE_RECORDING)
 					newdemo_record_laser_level(Players[Player_num].laser_level, Players[Player_num].laser_level + 1);
 				Players[Player_num].laser_level++;
+
 				powerup_basic(10, 0, 10, LASER_SCORE, "%s %s %d",TXT_LASER,TXT_BOOSTED_TO, Players[Player_num].laser_level+1);
 				update_laser_weapon_info();
 				pick_up_primary (LASER_INDEX);
 				used=1;
+
+				if (Game_mode & GM_MULTI)
+					multi_send_ship_status();
 			}
 			if (!used && !(Game_mode & GM_MULTI) )
 				used = pick_up_energy();
@@ -323,6 +417,10 @@ int do_powerup(object *obj)
 			else
 				used=1;
 			invalidate_escort_goal();
+
+			if (Game_mode & GM_MULTI)
+				multi_send_ship_status();
+
 			break;
 		case POW_KEY_RED:
 			if (Players[Player_num].flags & PLAYER_FLAGS_RED_KEY)
@@ -338,6 +436,10 @@ int do_powerup(object *obj)
 			else
 				used=1;
 			invalidate_escort_goal();
+
+			if (Game_mode & GM_MULTI)
+				multi_send_ship_status();
+
 			break;
 		case POW_KEY_GOLD:
 			if (Players[Player_num].flags & PLAYER_FLAGS_GOLD_KEY)
@@ -353,6 +455,10 @@ int do_powerup(object *obj)
 			else
 				used=1;
 			invalidate_escort_goal();
+
+			if (Game_mode & GM_MULTI)
+				multi_send_ship_status();
+
 			break;
 		case POW_QUAD_FIRE:
 			if (!(Players[Player_num].flags & PLAYER_FLAGS_QUAD_LASERS)) {
@@ -360,6 +466,9 @@ int do_powerup(object *obj)
 				powerup_basic(15, 15, 7, QUAD_FIRE_SCORE, "%s!",TXT_QUAD_LASERS);
 				update_laser_weapon_info();
 				used=1;
+
+				if (Game_mode & GM_MULTI)
+					multi_send_ship_status();
 			} else
 				HUD_init_message(HM_DEFAULT|HM_REDUNDANT|HM_MAYDUPL, "%s %s!",TXT_ALREADY_HAVE,TXT_QUAD_LASERS);
 			if (!used && !(Game_mode & GM_MULTI) )
@@ -492,6 +601,10 @@ int do_powerup(object *obj)
 				#endif
 				powerup_basic(-10,-10,-10, CLOAK_SCORE, "%s!",TXT_CLOAKING_DEVICE);
 				used = 1;
+
+				if (Game_mode & GM_MULTI)
+					multi_send_ship_status();
+
 				break;
 			}
 		case	POW_INVULNERABILITY:
@@ -501,8 +614,16 @@ int do_powerup(object *obj)
 			} else {
 				Players[Player_num].invulnerable_time = GameTime64;
 				Players[Player_num].flags |= PLAYER_FLAGS_INVULNERABLE;
+				#ifdef NETWORK
+				if (Game_mode & GM_MULTI)
+					multi_send_invuln();
+				#endif
 				powerup_basic(7, 14, 21, INVULNERABILITY_SCORE, "%s!",TXT_INVULNERABILITY);
 				used = 1;
+
+				if (Game_mode & GM_MULTI)
+					multi_send_ship_status();
+
 				break;
 			}
 	#ifndef RELEASE
@@ -552,9 +673,11 @@ int do_powerup(object *obj)
 					newdemo_record_laser_level(old_level, Players[Player_num].laser_level);
 				powerup_basic(10, 0, 10, LASER_SCORE, "Super Boost to Laser level %d",Players[Player_num].laser_level+1);
 				update_laser_weapon_info();
-				if (Primary_weapon!=LASER_INDEX)
+				if (Players[Player_num].primary_weapon!=LASER_INDEX)
 			      check_to_use_primary (SUPER_LASER_INDEX);
 				used=1;
+				if (Game_mode & GM_MULTI)
+					multi_send_ship_status(); // observers need the new laser level, as for POW_LASER
 			}
 			if (!used && !(Game_mode & GM_MULTI) )
 				used = pick_up_energy();
@@ -574,6 +697,8 @@ int do_powerup(object *obj)
 				digi_play_sample( Powerup_info[obj->id].hit_sound, F1_0 );
 				powerup_basic(15, 0, 15, 0, "AMMO RACK!");
 				used=1;
+				if (Game_mode & GM_MULTI)
+					multi_send_ship_status(); // observers' ammo bar depends on this flag
 			}
 			break;
 
@@ -590,8 +715,12 @@ int do_powerup(object *obj)
 #endif
 				digi_play_sample( Powerup_info[obj->id].hit_sound, F1_0 );
 				powerup_basic(15, 15, 15, 0, "AFTERBURNER!");
-				Afterburner_charge = f1_0;
+				Players[Player_num].afterburner_charge = f1_0;
 				used=1;
+#ifdef NETWORK
+				if (Game_mode & GM_MULTI)
+					multi_send_ship_status();
+#endif
 			}
 			break;
 
@@ -627,6 +756,12 @@ int do_powerup(object *obj)
 					used=1;
 					multi_send_got_flag (Player_num);
 				}
+				// "Flags return to base": touching your own flag away from your goal sends it home
+				else if ((Netgame.game_flags & NETGAME_FLAG_CTF_BASE) && Segment2s[obj->segnum].special != SEGMENT_IS_GOAL_BLUE) {
+					powerup_basic(15, 0, 15, 0, "BLUE FLAG RETURNED!");
+					used=1;
+					ctf_drop_flag_at_goal (POW_FLAG_BLUE);
+				}
 		   break;
 
 		case POW_HOARD_ORB:
@@ -647,6 +782,12 @@ int do_powerup(object *obj)
 					Players[Player_num].flags |= PLAYER_FLAGS_FLAG;
 					used=1;
 					multi_send_got_flag (Player_num);
+				}
+				// "Flags return to base": touching your own flag away from your goal sends it home
+				else if ((Netgame.game_flags & NETGAME_FLAG_CTF_BASE) && Segment2s[obj->segnum].special != SEGMENT_IS_GOAL_RED) {
+					powerup_basic(15, 0, 15, 0, "RED FLAG RETURNED!");
+					used=1;
+					ctf_drop_flag_at_goal (POW_FLAG_RED);
 				}
 		   break;
 #endif
@@ -690,3 +831,4 @@ extern int powerup_type_info_read_n(powerup_type_info *pti, int n, PHYSFS_file *
 	}
 	return i;
 }
+

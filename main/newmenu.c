@@ -91,30 +91,71 @@ struct newmenu
 	int				is_scroll_box;   // Is this a scrolling box? Set to false at init
 	int				max_on_menu;
 	int				mouse_state, dblclick_flag;
+	int				left_down;		// a left button press started in this menu
+	int				no_click_anywhere;	// message boxes: a click must land on a button
 	int				*rval;			// Pointer to return value (for polling newmenus)
 	void			*userdata;		// For whatever - like with window system
 };
 
-grs_bitmap nm_background, nm_background1;
-grs_bitmap *nm_background_sub = NULL;
+// Set by the message boxes just before they open their menu, so it doesn't take a click anywhere as Enter
+static int next_menu_no_click_anywhere;
+
+grs_bitmap nm_background1;
+#ifdef OGL
+static ubyte nm_background1_palette[768]; // an 8-bit full-screen picture's own colours
+static sbyte nm_background1_rgb;          // 24-bit PCX: bm_data holds RGB pixels, no palette
+#endif
+
+// Menu box pictures, each loaded on first use. [0] is scoresb.pcx (scores.pcx if it is missing),
+// the fallback; the rest are one per box shape, picked by the box's width / height.
+#define NM_BG_COUNT 6
+static const char *nm_bg_base[NM_BG_COUNT] = { "scoresb", "scoresb-tall", "scoresb-square", "scoresb-std", "scoresb-wide", "scoresb-strip" };
+static const float nm_bg_max_aspect[NM_BG_COUNT] = { 0, 1.05f, 1.38f, 1.8f, 2.5f, 0 }; // the last shape takes everything wider
+static grs_bitmap nm_bg[NM_BG_COUNT];
+static grs_bitmap *nm_bg_sub[NM_BG_COUNT];
+static ubyte nm_bg_palette[NM_BG_COUNT][768]; // each PCX's own colours
+static char nm_bg_name[NM_BG_COUNT][32];
+static sbyte nm_bg_missing[NM_BG_COUNT];
+static sbyte nm_bg_rgb[NM_BG_COUNT]; // 24-bit PCX: bm_data holds RGB pixels, no palette
 
 newmenu *newmenu_do4( char * title, char * subtitle, int nitems, newmenu_item * item, int (*subfunction)(newmenu *menu, d_event *event, void *userdata), void *userdata, int citem, char * filename, int TinyMode, int TabsFlag );
 
+	// One-shot rightward nudge applied to the NEXT menu created, in pixels at the
+	// 2560x1440 reference resolution the menu background art is authored at, scaled
+	// to the current canvas width so it looks the same at any resolution. Consumed
+	// on use so it never leaks into other menus.
+	static int newmenu_x_nudge_px = 0;
+
+	void newmenu_set_x_nudge(int px) { newmenu_x_nudge_px = px; }
+
 void newmenu_free_background()	{
-	if (nm_background.bm_data)
+	int i;
+	for (i = 0; i < NM_BG_COUNT; i++)
 	{
-		if (nm_background_sub)
+		if (nm_bg_sub[i])
 		{
-			gr_free_sub_bitmap(nm_background_sub);
-			nm_background_sub = NULL;
+			gr_free_sub_bitmap(nm_bg_sub[i]);
+			nm_bg_sub[i] = NULL;
 		}
-		gr_free_bitmap_data (&nm_background);
+		if (nm_bg[i].bm_data)
+			gr_free_bitmap_data (&nm_bg[i]);
+		nm_bg_missing[i] = 0;
+		nm_bg_rgb[i] = 0;
 	}
 	if (nm_background1.bm_data)
 		gr_free_bitmap_data (&nm_background1);
+#ifdef OGL
+	nm_background1_rgb = 0;
+#endif
 }
 
-// Draws the custom menu background pcx, if available
+#ifdef OGL
+extern unsigned char *ogl_pal;
+#endif
+
+// Draws the custom menu background pcx, if available.
+// In OGL the picture lives in its own texture, 24-bit or built from its own palette, and the
+// game palette is left alone, so the picture can never change the menu text colours.
 void nm_draw_background1(char * filename)
 {
 	int pcx_error;
@@ -124,41 +165,137 @@ void nm_draw_background1(char * filename)
 		if (nm_background1.bm_data == NULL)
 		{
 			gr_init_bitmap_data (&nm_background1);
+#ifdef OGL
+			{
+				int rw, rh;
+				ubyte *rgb;
+				pcx_error = pcx_read_rgb(filename, &rw, &rh, &rgb);
+				if (pcx_error == PCX_ERROR_NONE)
+				{
+					gr_init_bitmap(&nm_background1, BM_LINEAR, 0, 0, rw, rh, rw, rgb);
+					nm_background1_rgb = 1;
+				}
+				else
+					pcx_error = pcx_read_bitmap( filename, &nm_background1, BM_LINEAR, nm_background1_palette );
+			}
+#else
 			pcx_error = pcx_read_bitmap( filename, &nm_background1, BM_LINEAR, gr_palette );
+#endif
 			Assert(pcx_error == PCX_ERROR_NONE);
 			(void)pcx_error;
 		}
 		gr_palette_load( gr_palette );
+#ifdef OGL
+		if (nm_background1.bm_data)
+		{
+			if (!nm_background1.gltexture || nm_background1.gltexture->handle <= 0)
+			{
+				if (nm_background1_rgb)
+					ogl_loadrgbtexture(&nm_background1, nm_background1.bm_data, GameCfg.TexFilt);
+				else
+				{
+					ogl_pal = nm_background1_palette;
+					ogl_loadbmtexture_f(&nm_background1, GameCfg.TexFilt, NULL);
+					ogl_pal = gr_palette;
+				}
+			}
+			ogl_ubitmapm_cs(0,0,-1,-1,&nm_background1,-1,F1_0); // OGL scaling, any picture size
+		}
+#else
 		show_fullscr(&nm_background1);
+#endif
 	}
 
 	strcpy(last_palette_loaded,"");		//force palette load next time
 }
 
-#define MENU_BACKGROUND_BITMAP_HIRES (PHYSFSX_exists("scoresb.pcx",1)?"scoresb.pcx":"scores.pcx")
-#define MENU_BACKGROUND_BITMAP_LORES (PHYSFSX_exists("scores.pcx",1)?"scores.pcx":"scoresb.pcx")
-#define MENU_BACKGROUND_BITMAP (HIRESMODE?MENU_BACKGROUND_BITMAP_HIRES:MENU_BACKGROUND_BITMAP_LORES)
+// Always the HD scoresb.pcx; scores.pcx only if scoresb.pcx is missing
+#define MENU_BACKGROUND_BITMAP (PHYSFSX_exists("scoresb.pcx",1)?"scoresb.pcx":"scores.pcx")
+
+// Loads menu box picture i once. Returns 0 if its file isn't there (picture 0 must be).
+static int nm_bg_load(int i)
+{
+	if (nm_bg[i].bm_data)
+		return 1;
+	if (nm_bg_missing[i])
+		return 0;
+	if (i == 0)
+		snprintf(nm_bg_name[i], sizeof(nm_bg_name[i]), "%s", MENU_BACKGROUND_BITMAP);
+	else
+		snprintf(nm_bg_name[i], sizeof(nm_bg_name[i]), "%s.pcx", nm_bg_base[i]);
+	gr_init_bitmap_data (&nm_bg[i]);
+#ifdef RT_DX12
+	{
+		// A full-colour PNG of the same name wins over the PCX: loose in the game
+		// folder or inside a .dxa pack. Shown as-is (BM_RGBA8), no palette remap.
+		char png[32];
+		if (i == 0)
+			snprintf(png, sizeof(png), "%s", PHYSFSX_exists("scoresb.png", 1) ? "scoresb.png" : "scores.png");
+		else
+			snprintf(png, sizeof(png), "%s.png", nm_bg_base[i]);
+		if (PHYSFSX_exists(png, 1) && pcx_read_bitmap(png, &nm_bg[i], BM_LINEAR, nm_bg_palette[i]) == PCX_ERROR_NONE)
+		{
+			snprintf(nm_bg_name[i], sizeof(nm_bg_name[i]), "%s", png);
+			return 1;
+		}
+		gr_init_bitmap_data (&nm_bg[i]);
+	}
+#endif
+#ifdef OGL
+	{
+		int rw, rh;
+		ubyte *rgb;
+		if (pcx_read_rgb(nm_bg_name[i], &rw, &rh, &rgb) == PCX_ERROR_NONE)
+		{
+			gr_init_bitmap(&nm_bg[i], BM_LINEAR, 0, 0, rw, rh, rw, rgb);
+			nm_bg_rgb[i] = 1;
+			return 1;
+		}
+	}
+#endif
+	if (pcx_read_bitmap(nm_bg_name[i], &nm_bg[i], BM_LINEAR, nm_bg_palette[i]) != PCX_ERROR_NONE)
+	{
+		Assert(i != 0);
+		gr_free_bitmap_data (&nm_bg[i]);
+		nm_bg_missing[i] = 1;
+		return 0;
+	}
+#ifndef OGL
+	gr_remap_bitmap_good( &nm_bg[i], nm_bg_palette[i], -1, -1 );
+#endif
+	return 1;
+}
+
+#ifdef OGL
+// Builds the box texture from the PCX's own palette instead of the game palette, so the picture
+// keeps the colours it was drawn with and the game palette (menu text and everything else) is
+// never touched. Also run on every draw, so a texture dropped by a video reset is rebuilt the same way.
+static void nm_background_texture(int i)
+{
+	if (nm_bg[i].gltexture && nm_bg[i].gltexture->handle > 0)
+		return;
+	if (nm_bg_rgb[i])
+	{
+		ogl_loadrgbtexture(&nm_bg[i], nm_bg[i].bm_data, GameCfg.TexFilt); // full colour, no palette at all
+		return;
+	}
+	ogl_pal = nm_bg_palette[i];
+	ogl_loadbmtexture_f(&nm_bg[i], GameCfg.TexFilt, GameCfg.TexFilt ? nm_bg_base[i] : NULL);
+	ogl_pal = gr_palette;
+}
+#endif
 
 // Draws the frame background for menus
 void nm_draw_background(int x1, int y1, int x2, int y2 )
 {
-	int w,h,init_sub=0;
-	static float BGScaleX=1,BGScaleY=1;
+	int w,h,sx,sy,sw,sh,b;
+	float BGScaleX,BGScaleY;
+	grs_bitmap *bg;
 	grs_canvas *tmp,*old;
 
-	if (nm_background.bm_data == NULL)
-	{
-		int pcx_error;
-		ubyte background_palette[768];
-		gr_init_bitmap_data (&nm_background);
-		pcx_error = pcx_read_bitmap(MENU_BACKGROUND_BITMAP,&nm_background,BM_LINEAR,background_palette);
-		Assert(pcx_error == PCX_ERROR_NONE);
-		(void)pcx_error;
-		gr_remap_bitmap_good( &nm_background, background_palette, -1, -1 );
-		BGScaleX=((float)SWIDTH/nm_background.bm_w);
-		BGScaleY=((float)SHEIGHT/nm_background.bm_h);
-		init_sub=1;
-	}
+	nm_bg_load(0); // always loaded: the fallback, and its size sets the edge shading
+	BGScaleX=((float)SWIDTH/nm_bg[0].bm_w);
+	BGScaleY=((float)SHEIGHT/nm_bg[0].bm_h);
 
 	if ( x1 < 0 ) x1 = 0;
 	if ( y1 < 0 ) y1 = 0;
@@ -176,16 +313,34 @@ void nm_draw_background(int x1, int y1, int x2, int y2 )
 	gr_set_current_canvas(tmp);
 	gr_palette_load( gr_palette );
 
-	show_fullscr( &nm_background ); // show so we load all necessary data for the sub-bitmap
-	if (!init_sub && ((nm_background_sub->bm_w != w*(((float) nm_background.bm_w)/SWIDTH)) || (nm_background_sub->bm_h != h*(((float) nm_background.bm_h)/SHEIGHT))))
+	// Pick the picture made for this box's shape; the fallback if that file is missing
+	for (b = 1; b < NM_BG_COUNT - 1 && (float)max(w,1)/max(h,1) > nm_bg_max_aspect[b]; b++)
+		;
+	if (!nm_bg_load(b))
+		b = 0;
+	bg = &nm_bg[b];
+
+	// Fit the whole picture to the box, so its drawn frame shows on all 4 sides
+	sw = bg->bm_w;
+	sh = bg->bm_h;
+	sx = 0;
+	sy = 0;
+	if (nm_bg_sub[b] &&(nm_bg_sub[b]->bm_x != sx || nm_bg_sub[b]->bm_y != sy ||
+		nm_bg_sub[b]->bm_w != sw || nm_bg_sub[b]->bm_h != sh))
 	{
-		init_sub=1;
-		gr_free_sub_bitmap(nm_background_sub);
-		nm_background_sub = NULL;
+		gr_free_sub_bitmap(nm_bg_sub[b]);
+		nm_bg_sub[b] = NULL;
 	}
-	if (init_sub)
-		nm_background_sub = gr_create_sub_bitmap(&nm_background,0,0,w*(((float) nm_background.bm_w)/SWIDTH),h*(((float) nm_background.bm_h)/SHEIGHT));
-	show_fullscr( nm_background_sub );
+#ifdef OGL
+	nm_background_texture(b); // before the sub-bitmap, which takes the parent's texture pointer
+#endif
+	if (!nm_bg_sub[b])
+		nm_bg_sub[b] = gr_create_sub_bitmap(bg,sx,sy,sw,sh);
+#ifdef OGL
+	ogl_ubitmapm_cs(0,0,-1,-1,nm_bg_sub[b],-1,F1_0); // OGL scaling, any picture size
+#else
+	show_fullscr( nm_bg_sub[b] );
+#endif
 
 	gr_set_current_canvas(old);
 	gr_free_sub_canvas(tmp);
@@ -312,9 +467,10 @@ void nm_rstring( int w1,int x, int y, char * s )
 	gr_string( x-w, y, s );
 }
 
-void nm_string_inputbox( int w, int x, int y, char * text, int current )
+void nm_string_inputbox( int w, int x, int y, char * text, int current, int cursor )
 {
 	int w1,h1,aw;
+	char *start = text;
 
 	// even with variable char widths and a box that goes over the whole screen, we maybe never get more than 75 chars on the line
 	if (strlen(text)>75)
@@ -332,7 +488,21 @@ void nm_string_inputbox( int w, int x, int y, char * text, int current )
 	nm_string_black( w, x, y, text );
 
 	if ( current && timer_query() & 0x8000 )
+	{
+		if (cursor >= 0 && cursor < (int)strlen(start)) // a cursor inside the text (the resolution field): draw it there
+		{
+			char prefix[80];
+			int n = cursor - (int)(text - start);
+
+			if (n < 0)
+				n = 0;
+			snprintf(prefix, sizeof(prefix), "%.*s", n, text);
+			w1 = 0;
+			if (n)
+				gr_get_string_size(prefix, &w1, &h1, &aw);
+		}
 		gr_string( x+w1, y, CURSOR_STRING );
+	}
 }
 
 void draw_item( newmenu_item *item, int is_current, int tiny, int tabs_flag, int scroll_offset )
@@ -378,11 +548,11 @@ void draw_item( newmenu_item *item, int is_current, int tiny, int tabs_flag, int
 			{
 				nm_string( item->w, item->x, item->y-(((int)LINE_SPACING)*scroll_offset), item->text, tabs_flag );
 			} else {
-				nm_string_inputbox( item->w, item->x, item->y-(((int)LINE_SPACING)*scroll_offset), item->text, is_current );
+				nm_string_inputbox( item->w, item->x, item->y-(((int)LINE_SPACING)*scroll_offset), item->text, is_current, item->value );
 			}
 			break;
 		case NM_TYPE_INPUT:
-			nm_string_inputbox( item->w, item->x, item->y-(((int)LINE_SPACING)*scroll_offset), item->text, is_current );
+			nm_string_inputbox( item->w, item->x, item->y-(((int)LINE_SPACING)*scroll_offset), item->text, is_current, item->value );
 			break;
 		case NM_TYPE_CHECK:
 			nm_string( item->w, item->x, item->y-(((int)LINE_SPACING)*scroll_offset), item->text, tabs_flag );
@@ -540,6 +710,11 @@ window *newmenu_get_window(newmenu *menu)
 	return menu->wind;
 }
 
+void newmenu_set_rval(newmenu *menu, int rval)
+{
+	*menu->rval = rval;
+}
+
 void newmenu_scroll(newmenu *menu, int amount)
 {
 	int i = 0, first = 0, last = 0;
@@ -623,6 +798,29 @@ void newmenu_scroll(newmenu *menu, int amount)
 	}
 }
 
+// Is the mouse on one of this menu's scroll arrows? (the same boxes the scroll code below uses)
+static int newmenu_over_scroll_arrow(newmenu *menu, int mx, int my)
+{
+	int arrow_width, arrow_height, aw, x1, y1;
+
+	if (!menu->is_scroll_box)
+		return 0;
+	x1 = grd_curcanv->cv_bitmap.bm_x+BORDERX-FSPACX(12);
+	if (menu->scroll_offset != 0) {
+		gr_get_string_size(UP_ARROW_MARKER, &arrow_width, &arrow_height, &aw);
+		y1 = grd_curcanv->cv_bitmap.bm_y + menu->items[menu->scroll_offset].y-(((int)LINE_SPACING)*menu->scroll_offset);
+		if ((mx > x1) && (mx < x1 + arrow_width) && (my > y1) && (my < y1 + arrow_height))
+			return 1;
+	}
+	if (menu->scroll_offset+menu->max_displayable<menu->nitems) {
+		gr_get_string_size(DOWN_ARROW_MARKER, &arrow_width, &arrow_height, &aw);
+		y1 = grd_curcanv->cv_bitmap.bm_y + menu->items[menu->scroll_offset+menu->max_displayable-1].y-(((int)LINE_SPACING)*menu->scroll_offset);
+		if ((mx > x1) && (mx < x1 + arrow_width) && (my > y1) && (my < y1 + arrow_height))
+			return 1;
+	}
+	return 0;
+}
+
 int newmenu_mouse(window *wind, d_event *event, newmenu *menu, int button)
 {
 	int old_choice, i, mx=0, my=0, mz=0, x1 = 0, x2, y1, y2, changed = 0;
@@ -635,6 +833,9 @@ int newmenu_mouse(window *wind, d_event *event, newmenu *menu, int button)
 			gr_set_current_canvas(menu_canvas);
 
 			old_choice = menu->citem;
+
+			if (event->type == EVENT_MOUSE_BUTTON_DOWN)
+				menu->left_down = 1;
 
 			if ((event->type == EVENT_MOUSE_BUTTON_DOWN) && !menu->all_text)
 			{
@@ -783,13 +984,27 @@ int newmenu_mouse(window *wind, d_event *event, newmenu *menu, int button)
 
 			if ((event->type == EVENT_MOUSE_BUTTON_UP) && !menu->all_text && (menu->citem != -1) && (menu->items[menu->citem].type == NM_TYPE_MENU) )
 			{
+				// Click anywhere = Enter: a left click that lands on no item picks the highlighted one.
+				// Not in message boxes, not on the scroll arrows, and only for a press that started in this menu.
+				int click_anywhere;
+
 				mouse_get_pos(&mx, &my, &mz);
+				click_anywhere = menu->left_down && !menu->no_click_anywhere && !newmenu_over_scroll_arrow(menu, mx, my);
+				for (i=menu->scroll_offset; click_anywhere && i<menu->max_on_menu+menu->scroll_offset; i++ )	{
+					x1 = grd_curcanv->cv_bitmap.bm_x + menu->items[i].x-FSPACX(13);
+					x2 = x1 + menu->items[i].w+FSPACX(13);
+					y1 = grd_curcanv->cv_bitmap.bm_y + menu->items[i].y - (((int)LINE_SPACING)*menu->scroll_offset);
+					y2 = y1 + menu->items[i].h;
+					if (((mx > x1) && (mx < x2)) && ((my > y1) && (my < y2)))
+						click_anywhere = 0;
+				}
+				menu->left_down = 0;
 				for (i=menu->scroll_offset; i<menu->max_on_menu+menu->scroll_offset; i++ )	{
 					x1 = grd_curcanv->cv_bitmap.bm_x + menu->items[i].x-FSPACX(13);
 					x2 = x1 + menu->items[i].w+FSPACX(13);
 					y1 = grd_curcanv->cv_bitmap.bm_y + menu->items[i].y - (((int)LINE_SPACING)*menu->scroll_offset);
 					y2 = y1 + menu->items[i].h;
-					if (((mx > x1) && (mx < x2)) && ((my > y1) && (my < y2))) {
+					if ((((mx > x1) && (mx < x2)) && ((my > y1) && (my < y2))) || (click_anywhere && i == menu->citem)) {
 						if (Hack_DblClick_MenuMode) {
 							if (menu->dblclick_flag)
 							{
@@ -1334,6 +1549,14 @@ void newmenu_create_structure( newmenu *menu )
 	menu->h += BORDERY*2;
 
 	menu->x = (GWIDTH-menu->w)/2;
+	// One-shot rightward nudge, then consumed so it can't affect later menus.
+	// newmenu_x_nudge_px is authored for the 2560x1440 background art; scale by
+	// canvas width so the same visual offset applies at other resolutions.
+	if (newmenu_x_nudge_px)
+	{
+		menu->x += (newmenu_x_nudge_px * GWIDTH) / 2560;
+		newmenu_x_nudge_px = 0;
+	}
 	menu->y = (GHEIGHT-menu->h)/2;
 
 	if ( menu->x < 0 ) menu->x = 0;
@@ -1532,7 +1755,7 @@ int newmenu_handler(window *wind, d_event *event, newmenu *menu)
 			break;
 
 		case EVENT_IDLE:
-			timer_delay2(50);
+			menu_frame_delay();
 
 			return newmenu_mouse(wind, event, menu, -1);
 			break;
@@ -1580,6 +1803,8 @@ newmenu *newmenu_do4( char * title, char * subtitle, int nitems, newmenu_item * 
 	menu->is_scroll_box = 0;
 	menu->max_on_menu = TinyMode?MAXDISPLAYABLEITEMSTINY:MAXDISPLAYABLEITEMS;
 	menu->dblclick_flag = 0;
+	menu->no_click_anywhere = next_menu_no_click_anywhere;
+	next_menu_no_click_anywhere = 0; // only for this menu, not ones opened from inside it
 	menu->title = title;
 	menu->subtitle = subtitle;
 	menu->nitems = nitems;
@@ -1645,6 +1870,7 @@ int nm_messagebox1( char *title, int (*subfunction)(newmenu *menu, d_event *even
 
 	Assert(strlen(nm_text) < MESSAGEBOX_TEXT_SIZE);
 
+	next_menu_no_click_anywhere = 1;
 	return newmenu_do( title, nm_text, nchoices, nm_message_items, subfunction, userdata );
 }
 
@@ -1672,6 +1898,7 @@ int nm_messagebox( char *title, int nchoices, ... )
 
 	Assert(strlen(nm_text) < MESSAGEBOX_TEXT_SIZE );
 
+	next_menu_no_click_anywhere = 1;
 	return newmenu_do( title, nm_text, nchoices, nm_message_items, NULL, NULL );
 }
 
@@ -1712,6 +1939,7 @@ struct listbox
 	int box_w, height, box_x, box_y, title_height;
 	short swidth, sheight; float fntscalex, fntscaley; // with these we check if resolution or fonts have changed so listbox structure can be recreated
 	int mouse_state;
+	int left_down; // a left button press started in this list
 	void *userdata;
 };
 
@@ -1783,6 +2011,8 @@ int listbox_mouse(window *wind, d_event *event, listbox *lb, int button)
 	{
 		case MBTN_LEFT:
 		{
+			if (event->type == EVENT_MOUSE_BUTTON_DOWN)
+				lb->left_down = 1;
 			if (lb->mouse_state)
 			{
 				int w, h, aw;
@@ -1805,17 +2035,25 @@ int listbox_mouse(window *wind, d_event *event, listbox *lb, int button)
 			else if (event->type == EVENT_MOUSE_BUTTON_UP)
 			{
 				int w, h, aw;
+				int click_anywhere = lb->left_down; // a click on no row picks the highlighted one, like Enter
 
+				lb->left_down = 0;
 				if (lb->citem < 0)
 					return 0;
 
 				mouse_get_pos(&mx, &my, &mz);
+				for (i=lb->first_item; click_anywhere && i<lb->first_item+LB_ITEMS_ON_SCREEN && i<lb->nitems; i++ )	{
+					gr_get_string_size(lb->item[i], &w, &h, &aw  );
+					y1 = (i-lb->first_item)*LINE_SPACING+lb->box_y;
+					if ( ((mx > lb->box_x) && (mx < lb->box_x + lb->box_w)) && ((my > y1) && (my < y1+h)) )
+						click_anywhere = 0;
+				}
 				gr_get_string_size(lb->item[lb->citem], &w, &h, &aw  );
 				x1 = lb->box_x;
 				x2 = lb->box_x + lb->box_w;
 				y1 = (lb->citem-lb->first_item)*LINE_SPACING+lb->box_y;
 				y2 = y1+h;
-				if ( ((mx > x1) && (mx < x2)) && ((my > y1) && (my < y2)) )
+				if ( (((mx > x1) && (mx < x2)) && ((my > y1) && (my < y2))) || click_anywhere )
 				{
 					// Tell callback, allow staying in menu
 					event->type = EVENT_NEWMENU_SELECTED;
@@ -1864,35 +2102,51 @@ int listbox_mouse(window *wind, d_event *event, listbox *lb, int button)
 
 int listbox_key_command(window *wind, d_event *event, listbox *lb)
 {
+	// Note: statics are required to be zero-initialized in C, so we don't need to do it explicitly
+	static char ascii_buffer[PATH_MAX];
+	static fix64 last_key_time;
+
+	// Reset the buffer after 3 seconds of inactivity
+	if (last_key_time + F3_0 < timer_query())
+		ascii_buffer[0] = 0;
+	last_key_time = timer_query();
+
 	int key = event_key_get(event);
 	int rval = 1;
 
 	switch(key)	{
 		case KEY_HOME:
 		case KEY_PAD7:
+			ascii_buffer[0] = 0;
 			lb->citem = 0;
 			break;
 		case KEY_END:
 		case KEY_PAD1:
+			ascii_buffer[0] = 0;
 			lb->citem = lb->nitems-1;
 			break;
 		case KEY_UP:
 		case KEY_PAD8:
+			ascii_buffer[0] = 0;
 			lb->citem--;
 			break;
 		case KEY_DOWN:
 		case KEY_PAD2:
+			ascii_buffer[0] = 0;
 			lb->citem++;
 			break;
 		case KEY_PAGEDOWN:
 		case KEY_PAD3:
+			ascii_buffer[0] = 0;
 			lb->citem += LB_ITEMS_ON_SCREEN;
 			break;
 		case KEY_PAGEUP:
 		case KEY_PAD9:
+			ascii_buffer[0] = 0;
 			lb->citem -= LB_ITEMS_ON_SCREEN;
 			break;
 		case KEY_ESC:
+			ascii_buffer[0] = 0;
 			if (lb->allow_abort_flag) {
 				lb->citem = -1;
 				window_close(wind);
@@ -1901,6 +2155,7 @@ int listbox_key_command(window *wind, d_event *event, listbox *lb)
 			break;
 		case KEY_ENTER:
 		case KEY_PADENTER:
+			ascii_buffer[0] = 0;
 			// Tell callback, allow staying in menu
 			event->type = EVENT_NEWMENU_SELECTED;
 			if (lb->listbox_callback && (*lb->listbox_callback)(lb, event, lb->userdata))
@@ -1913,23 +2168,22 @@ int listbox_key_command(window *wind, d_event *event, listbox *lb)
 		default:
 		{
 			int ascii = key_ascii();
-			if ( ascii < 255 )	{
-				int cc,cc1;
-				cc=cc1=lb->citem+1;
-				if (cc1 < 0 )  cc1 = 0;
-				if (cc1 >= lb->nitems )  cc1 = 0;
-				while(1) {
-					if ( cc < 0 ) cc = 0;
-					if ( cc >= lb->nitems ) cc = 0;
-					if ( lb->citem == cc ) break;
+			if (ascii < 255) {
+				size_t len = strlen(ascii_buffer);
+				if (len < SDL_arraysize(ascii_buffer) - 1) {
+					ascii_buffer[len++] = ascii;
+					ascii_buffer[len] = 0;
 
-					if ( toupper( lb->item[cc][0] ) == toupper(ascii) )	{
-						lb->citem = cc;
-						break;
-					}
-					cc++;
+					// We're only going to need to search backward for the first letter
+					for (int cc = len > 1 ? lb->citem : 0; cc < lb->nitems; cc++)
+						if (d_strnicmp(lb->item[cc], ascii_buffer, strlen(ascii_buffer)) == 0) {
+							lb->citem = cc;
+							break;
+						}
 				}
 			}
+			else
+				ascii_buffer[0] = 0;
 			rval = 0;
 		}
 	}
@@ -1988,6 +2242,7 @@ void listbox_create_structure( listbox *lb)
 	update_scroll_position(lb);
 
 	lb->mouse_state = 0;	//dblclick_flag = 0;
+	lb->left_down = 0;
 	lb->swidth = SWIDTH;
 	lb->sheight = SHEIGHT;
 	lb->fntscalex = FNTScaleX;
@@ -2121,7 +2376,7 @@ int listbox_handler(window *wind, d_event *event, listbox *lb)
 			break;
 
 		case EVENT_IDLE:
-			timer_delay2(50);
+			menu_frame_delay();
 
 			return listbox_mouse(wind, event, lb, -1);
 			break;

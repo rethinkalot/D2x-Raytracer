@@ -111,6 +111,11 @@ void menu_draw(MENU *menu)
 	int i;
 	
 	gr_set_current_canvas(NULL);
+\t\t// Draw the background image if present (for 24-bit menu backgrounds)
+    \tif (menu->background != NULL)
+    \t{
+    \t\tgr_blit(menu->background, menu->x, menu->y, 0, 0, menu->w, menu->h, GR_BLEND_NORMAL);
+    \t}
 
 	// Draw the menu background
 	gr_setcolor( CGREY );

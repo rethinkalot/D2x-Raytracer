@@ -25,11 +25,31 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "window.h"
 #include "vecmat.h"
 
-#ifdef NDEBUG
-#define MAXIMUM_FPS 200
-#else
-#define MAXIMUM_FPS 1000
-#endif
+// Lower bound accepted for the framerate cap. Below this the game becomes hard
+// to control and demos stop being reproducible. Kept as a named constant so the
+// Graphics Options label and the clamp that enforces it cannot disagree.
+#define MIN_FRAMERATE_CAP 25
+
+// Upper bound on the selectable / enforced framerate cap.
+//
+// 360 is the refresh rate of the fastest widely-available panels. Matching it
+// exactly means the cap is never the limiting factor on a 360Hz display: at 360
+// the game can present a fresh frame on every single refresh, with none dropped.
+//
+// A cap ABOVE the panel rate is still useful rather than pointless, because it
+// gives the pacer freedom to finish a frame slightly early and then idle into
+// the deadline rather than always landing exactly on it -- which keeps frame
+// pacing even. But going far past the refresh rate buys nothing visible while
+// costing CPU, so this sits AT the top common refresh rate instead of above it.
+//
+// This bounds BOTH paths: with vsync on it is the enforced cap, and with vsync
+// off it is the ceiling the menu / config clamps PlayerCfg.maxFps to.
+//
+// Note the value is irrelevant to game SPEED. FrameTime is measured wall-clock
+// from the start of one frame to the start of the next, so the sim advances at
+// the same rate regardless of this cap; it only controls how often that slice of
+// real time gets sampled, and therefore how responsive mouse input feels.
+#define MAXIMUM_FPS 360
 
 struct object;
 
@@ -83,7 +103,7 @@ extern int ft_preference;
 #define GM_BOUNTY	2048	/* New bounty mode by Matt1360 */
 #define GM_NORMAL       0       // You are in normal play mode, no multiplayer stuff
 #define GM_MULTI        38      // You are in some type of multiplayer game
-
+#define GM_OBSERVER     4096    // You are observing this game
 
 #define NDL 5       // Number of difficulty levels.
 
@@ -113,15 +133,14 @@ extern int Game_suspended;          // if non-zero, nothing moves but player
 
 #define	SHOW_EXIT_PATH	1
 
-// CED -- Retrohomers FPS
-#define idealHomerFPS 30.0;
-
 // from game.c
 void init_game(void);
 void game(void);
 void close_game(void);
 void init_cockpit(void);
 void calc_frame_time(void);
+void menu_frame_delay(void);
+void calc_game_time(void);
 void calc_d_tick();
 int do_flythrough(struct object *obj,int first_time);
 
@@ -155,6 +174,12 @@ extern int last_drawn_cockpit;
 
 extern void stop_time(void);
 extern void start_time(void);
+extern int game_time_is_paused(void);   // true while the simulation is frozen (pause)
+
+// Should palette flash effects be damped? See reduced_flash_wanted() in game.c
+// for the single-player vs. multiplayer rule. Every effect site goes through
+// this so they cannot drift apart.
+extern int reduced_flash_wanted(void);
 extern void reset_time(void);       // called when starting level
 
 // If automap_flag == 1, then call automap routine to write message.
@@ -239,6 +264,10 @@ void flickering_light_write(flickering_light *fl, PHYSFS_file *fp);
 
 void game_render_frame_mono(int flip);
 void game_leave_menus(void);
+
+bool is_observer();
+struct object* get_player_view_object();
+bool can_draw_observer_cockpit();
 
 //Cheats
 typedef struct game_cheats

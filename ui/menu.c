@@ -32,6 +32,7 @@ typedef struct menu
 	char ** button;
 	int *choice;
 	int num_buttons;
+\tgrs_bitmap *background;  // Background bitmap for the menu
 } menu;
 
 static int menu_handler(UI_DIALOG *dlg, d_event *event, menu *m)
@@ -56,7 +57,7 @@ static int menu_handler(UI_DIALOG *dlg, d_event *event, menu *m)
 	return 0;
 }
 
-int MenuX( int x, int y, int NumButtons, char * text[] )
+int MenuX( int x, int y, int NumButtons, char * text[], char * background_file )
 {
 	UI_DIALOG * dlg;
 	menu *m;
@@ -68,6 +69,10 @@ int MenuX( int x, int y, int NumButtons, char * text[] )
 	MALLOC(m, menu, 1);
 	m->num_buttons = NumButtons;
 	m->button_g = (UI_GADGET_BUTTON **) d_malloc(sizeof(UI_GADGET_BUTTON *)*NumButtons);
+\tm->background = NULL;
+\tif (background_file != NULL)
+\t{\n\t\tm->background = pcx_read_rgb(background_file, &m->background->bm_w, &m->background->bm_h, NULL);
+\t}
 	MALLOC(m->button, char *, NumButtons);
 	m->choice = &choice;
 

@@ -5,7 +5,7 @@
  */
 
 #include <string.h>
-#include <SDL/SDL.h>
+#include <SDL.h>
 
 #include "fix.h"
 #include "timer.h"
@@ -14,6 +14,9 @@
 #include "mouse.h"
 #include "playsave.h"
 #include "args.h"
+#ifdef OGL
+#include "gr.h"
+#endif
 #ifdef RT_DX12
 #include "VRMirrorLayout.h"
 #endif
@@ -138,9 +141,6 @@ void mouse_button_handler(SDL_MouseButtonEvent *mbe)
 void mouse_motion_handler(SDL_MouseMotionEvent *mme)
 {
 	d_event_mouse_moved event;
-	
-	if (GameArg.CtlNoMouse)
-		return;
 
 	Mouse.cursor_time = timer_query();
 	Mouse.x += mme->xrel;
@@ -185,6 +185,9 @@ void mouse_get_pos( int *x, int *y, int *z )
 	*x=Mouse.x;
 	*y=Mouse.y;
 	*z=Mouse.z;
+#ifdef OGL
+	gr_window_to_game(x, y);
+#endif
 #ifdef RT_DX12
     if(GameArg.SysOpenVR) {
         SDL_Surface* video=SDL_GetVideoSurface();

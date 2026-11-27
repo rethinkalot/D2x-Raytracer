@@ -26,6 +26,8 @@ extern void show_menus(void);
 
 // called once at program startup to get the player's name
 extern int RegisterPlayer();
+extern void res_startup_check(void); // startup: hold back a saved resolution far bigger than the monitor
+extern void res_startup_ask(void);   // then ask whether to use it
 
 // returns number of item chosen
 extern int DoMenu();
@@ -53,5 +55,7 @@ extern int select_demo(void);
 extern char *menu_difficulty_text[];
 extern int Escort_view_enabled;
 extern int Cockpit_rear_view;
+
+extern void get_color_name(char* color_name, int color_name_length, int color_value, int use_alternate_colors);
 
 #endif /* _MENU_H */

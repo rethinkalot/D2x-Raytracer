@@ -1,5 +1,6 @@
 #ifndef PNGFILE_H
 #define PNGFILE_H
+#include "pstypes.h" // for consistent struct packing
 
 typedef struct _png_data {
 	unsigned int width;
@@ -12,9 +13,13 @@ typedef struct _png_data {
 
 	unsigned char *data;
 	unsigned char *palette;
-	unsigned int num_palette;
+	int num_palette;
 } png_data;
 
-extern int read_png(char *filename, png_data *pdata);
+extern int read_png(const char *filename, png_data *pdata);
+/* Returns a borrowed image retained in memory until free_png_cache(). */
+extern int read_png_cached(const char *filename, png_data **pdata);
+extern void free_png_cache(void);
+extern int write_png(const char *filename, png_data *pdata);
 
 #endif

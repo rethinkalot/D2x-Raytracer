@@ -57,6 +57,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 object *Guided_missile[MAX_PLAYERS]={NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL};
 int Guided_missile_sig[MAX_PLAYERS]={-1,-1,-1,-1,-1,-1,-1,-1};
+
 int Network_laser_track = -1;
 
 int find_homing_object_complete(vms_vector *curpos, object *tracker, int track_obj_type1, int track_obj_type2);
@@ -68,9 +69,30 @@ extern void newdemo_record_guided_start();
 
 int find_homing_object(vms_vector *curpos, object *tracker);
 
+// D1-style weapon behavior toggle.
+// Multiplayer: the host's "Original D1 Weapons" netgame option has full
+// authority -- the local single-player preference is ignored so clients can
+// never diverge from the host's simulation.
+// Single-player: the Misc Options "Original D1 Weapons (SP)" checkbox,
+// applied on the fly.
+int using_original_d1_weapons(void)
+{
+	if (Game_mode & GM_MULTI)
+		return Netgame.OriginalD1Weapons;
+	return PlayerCfg.OriginalD1Weapons;
+}
+
 //---------------------------------------------------------------------------------
 // Called by render code.... determines if the laser is from a robot or the
 // player and calls the appropriate routine.
+
+// Guns of the ship whose cockpit we are in play centered: our own, or the ship an observer
+// follows in first person (its gun tips sit beside the camera and would pan hard to one side).
+static int fire_sound_is_local(int parent_objnum)
+{
+	return parent_objnum == Viewer-Objects ||
+		(is_observing_player() && !Obs_at_distance && parent_objnum == Players[Current_obs_player].objnum);
+}
 
 void Laser_render(object *obj)
 {
@@ -94,6 +116,8 @@ void Laser_render(object *obj)
 					//Laser_draw_one(obj-Objects, Weapon_info[obj->id].bitmap );
 		break;
 	case WEAPON_RENDER_BLOB:
+		if (draw_weapon_xmodel(obj)) // D2 prox bomb is a blob: proxmine.ase
+			break;
 		draw_object_blob(obj, Weapon_info[obj->id].bitmap  );
 		break;
 	case WEAPON_RENDER_POLYMODEL:
@@ -482,7 +506,7 @@ void omega_charge_frame(void)
 	if (Omega_charge == MAX_OMEGA_CHARGE)
 		return;
 
-	if (!(player_has_weapon(OMEGA_INDEX, 0) & HAS_WEAPON_FLAG))
+	if (!(player_has_weapon(Player_num, OMEGA_INDEX, 0) & HAS_WEAPON_FLAG))
 		return;
 
 	if (Player_is_dead)
@@ -501,6 +525,8 @@ void omega_charge_frame(void)
 		Omega_charge += FrameTime/OMEGA_CHARGE_SCALE;
 		if (Omega_charge > MAX_OMEGA_CHARGE)
 			Omega_charge = MAX_OMEGA_CHARGE;
+		if (Game_mode & GM_MULTI)
+			multi_send_ship_status(); // observers show this charge; the send itself is rate limited
 
 		delta_charge = Omega_charge - old_omega_charge;
 
@@ -538,6 +564,8 @@ void do_omega_stuff(object *parent_objp, vms_vector *firing_pos, object *weapon_
 		Omega_charge -= OMEGA_BASE_TIME;
 		if (Omega_charge < 0)
 			Omega_charge = 0;
+		if (Game_mode & GM_MULTI)
+			multi_send_ship_status(); // observers show this charge; the send itself is rate limited
 
 		if (GameTime64 - Last_omega_fire_time + OMEGA_BASE_TIME <= FrameTime) // if firing is prolonged by FrameTime overhead, let's try to fix that. Since Next_laser_firing_time is probably changed already (in do_laser_firing_player), we need to calculate the overhead slightly different. 
 			fire_frame_overhead = GameTime64 - Last_omega_fire_time + OMEGA_BASE_TIME;
@@ -555,7 +583,7 @@ void do_omega_stuff(object *parent_objp, vms_vector *firing_pos, object *weapon_
 	firing_segnum = find_point_seg(firing_pos, parent_objp->segnum);
 
 	//	Play sound.
-	if ( parent_objp == Viewer )
+	if ( fire_sound_is_local(parent_objp-Objects) )
 		digi_play_sample( Weapon_info[weapon_objp->id].flash_sound, F1_0 );
 	else
 		digi_link_sound_to_pos( Weapon_info[weapon_objp->id].flash_sound, weapon_objp->segnum, 0, &weapon_objp->pos, 0, F1_0 );
@@ -678,18 +706,24 @@ int Laser_create_new( vms_vector * direction, vms_vector * position, int segnum,
 		obj->mtype.phys_info.flags |= PF_STICK;		//this obj sticks to walls
 
 	obj->shields = Weapon_info[obj->id].strength[Difficulty_level];
-	if( (Game_mode & GM_MULTI) && Netgame.OriginalD1Weapons) {
-		if(obj->id == 0) {        // Laser 1
+	if( using_original_d1_weapons()) {
+		// Laser ladder 10, 10.5, 11, 11.5, 11.5, 12.5. Laser 5 also fires 5% faster (do_laser_firing_player),
+		// Laser 6 also travels 5% faster (the weapon_speed spots below)
+		if(obj->id == LASER_ID_L1) {        // Laser 1
+			obj->shields = 10 * F1_0;
+		} else if(obj->id == LASER_ID_L2) { // Laser 2
+			obj->shields = 10 * F1_0 + F1_0/2;
+		} else if(obj->id == LASER_ID_L3) { // Laser 3
+			obj->shields = 11 * F1_0;
+		} else if(obj->id == LASER_ID_L4) { // Laser 4
+			obj->shields = 11 * F1_0 + F1_0/2;
+		} else if(obj->id == LASER_ID_L5) { // Laser 5
+			obj->shields = 11 * F1_0 + F1_0/2;
+		} else if(obj->id == LASER_ID_L6) { // Laser 6
+			obj->shields = 12 * F1_0 + F1_0/2;
+		} else if(obj->id == SPREADFIRE_ID) { // Spread
 			obj->shields = 10 * F1_0; 
-		} else if(obj->id == 1) { // Laser 2
-			obj->shields = 11 * F1_0; 
-		} else if(obj->id == 2) { // Laser 3
-			obj->shields = 12 * F1_0; 
-		} else if(obj->id == 3 || obj->id == 30 || obj->id == 31) { // Laser 4
-			obj->shields = 13 * F1_0; 
-		} else if(obj->id == 12) { // Spread
-			obj->shields = 10 * F1_0; 
-		} else if(obj->id == 14) { // Fusion
+		} else if(obj->id == FUSION_ID) { // Fusion
 			obj->shields = 60 * F1_0; 
 		}
 	}
@@ -733,7 +767,8 @@ int Laser_create_new( vms_vector * direction, vms_vector * position, int segnum,
 	if ((obj->render_type == RT_POLYOBJ) || (Weapon_info[obj->id].homing_flag))
 		vm_vector_2_matrix( &obj->orient,direction, &Objects[parent].orient.uvec ,NULL);
 
-	if (( &Objects[parent] != Viewer ) && (Objects[parent].type != OBJ_WEAPON))	{
+	if (( &Objects[parent] != Viewer ) && (Objects[parent].type != OBJ_WEAPON) &&
+		(!is_observer() || !PlayerCfg.ObsHideEnergyWeaponMuzzle[get_observer_game_mode()] || weapon_type == VULCAN_ID || weapon_type == GAUSS_ID || Weapon_info[weapon_type].damage_radius)) {
 		// Muzzle flash
 		if (Weapon_info[obj->id].flash_vclip > -1 )
 			object_create_muzzle_flash( obj->segnum, &obj->pos, Weapon_info[obj->id].flash_size, Weapon_info[obj->id].flash_vclip );
@@ -742,7 +777,7 @@ int Laser_create_new( vms_vector * direction, vms_vector * position, int segnum,
 	volume = F1_0;
 	if (Weapon_info[obj->id].flash_sound > -1 )	{
 		if (make_sound)	{
-			if ( parent == (Viewer-Objects) )	{
+			if ( fire_sound_is_local(parent) )	{
 				if (weapon_type == VULCAN_ID)	// Make your own vulcan gun  1/2 as loud.
 					volume = F1_0 / 2;
 				if(weapon_type == PLASMA_ID && PlayerCfg.QuietPlasma)  // Plasma's a bit loud, too
@@ -752,8 +787,12 @@ int Laser_create_new( vms_vector * direction, vms_vector * position, int segnum,
 				if(weapon_type == PLASMA_ID && PlayerCfg.QuietPlasma)  // Plasma's a bit loud, too
 					volume = F1_0  * 3 / 4; 
 
-				if(Weapon_info[obj->id].flash_sound == 22)  // Reactor ball
-					volume = F1_0  * 3 / 4; 		
+				if(Weapon_info[obj->id].flash_sound == 22) {  // Reactor ball
+					if (is_observer())
+						volume = F1_0  * 3 / 16;
+					else
+						volume = F1_0  * 3 / 4;
+				}
 
 				digi_link_sound_to_pos( Weapon_info[obj->id].flash_sound, obj->segnum, 0, &obj->pos, 0, volume );
 			}
@@ -804,10 +843,12 @@ int Laser_create_new( vms_vector * direction, vms_vector * position, int segnum,
 	if (Weapon_info[obj->id].thrust != 0)
 		weapon_speed /= 2;
 
-	if( (Game_mode & GM_MULTI) && Netgame.OriginalD1Weapons) {
-		if(obj->id == 12) { // Spread
-			weapon_speed = 200 * F1_0; 
-		} 
+	if( using_original_d1_weapons()) {
+		if(obj->id == SPREADFIRE_ID) { // Spread
+			weapon_speed = 200 * F1_0;
+		} else if(obj->id == LASER_ID_L6) { // Laser 6 travels 5% faster
+			weapon_speed = fixmuldiv(weapon_speed, 21, 20);
+		}
 	}
 
 	vm_vec_copy_scale( &obj->mtype.phys_info.velocity, direction, weapon_speed + parent_speed );
@@ -1008,7 +1049,7 @@ int find_homing_object(vms_vector *curpos, object *tracker)
 	else {
 		int	cur_min_trackable_dot;
 
-		cur_min_trackable_dot = MIN_TRACKABLE_DOT;
+		cur_min_trackable_dot = using_original_d1_weapons() ? D1_MIN_TRACKABLE_DOT : MIN_TRACKABLE_DOT;
 		if ((tracker->type == OBJ_WEAPON) && (tracker->id == OMEGA_ID))
 			cur_min_trackable_dot = OMEGA_MIN_TRACKABLE_DOT;
 
@@ -1112,7 +1153,7 @@ int find_homing_object_complete(vms_vector *curpos, object *tracker, int track_o
 	Assert((Weapon_info[tracker->id].homing_flag) || (tracker->id == OMEGA_ID));
 
 	max_trackable_dist = MAX_TRACKABLE_DIST;
-	min_trackable_dot = MIN_TRACKABLE_DOT;
+	min_trackable_dot = using_original_d1_weapons() ? D1_MIN_TRACKABLE_DOT : MIN_TRACKABLE_DOT;
 
 	if (tracker->id == OMEGA_ID) {
 		max_trackable_dist = OMEGA_MAX_TRACKABLE_DIST;
@@ -1168,8 +1209,11 @@ int find_homing_object_complete(vms_vector *curpos, object *tracker, int track_o
 		if (dist < max_trackable_dist) {
 			vm_vec_normalize(&vec_to_curobj);
 			dot = vm_vec_dot(&vec_to_curobj, &tracker->orient.fvec);
-			if (is_proximity)
+			if (is_proximity) {
+				if (using_original_d1_weapons())
+					continue;		//	D1 homers never lock on to enemy mines (D1 laser.c)
 				dot = ((dot << 3) + dot) >> 3;		//	I suspect Watcom would be too stupid to figure out the obvious...
+			}
 
 			//	Note: This uses the constant, not-scaled-by-frametime value, because it is only used
 			//	to determine if an object is initially trackable.  find_homing_object is called on subsequent
@@ -1197,7 +1241,7 @@ int track_track_goal(int track_goal, object *tracker, fix *dot, unsigned int hom
 {
 	if (object_is_trackable(track_goal, tracker, dot)) {  // CED -- && (tracker - Objects) is useless
 		return track_goal;
-	} else if ((((tracker-Objects) ^ homerFrameCount) % 4) == 0) // CED -- Reverted to original release code, with homer frame count
+	} else if (((homerFrameCount - tracker->ctype.laser_info.creation_framecount) % 4) == 0) // CED -- Reverted to 1994 original release code, with homer frame count
 
 /*
 #ifdef NEWHOMER
@@ -1285,10 +1329,12 @@ void Laser_player_fire_spread_delay(object *obj, int laser_type, int gun_num, fi
 	vm_vec_add(&LaserPos,&obj->pos,&gun_point);
 
 	fix weapon_speed = Weapon_info[laser_type].speed[Difficulty_level];
-	if( (Game_mode & GM_MULTI) && Netgame.OriginalD1Weapons) {
-		if(laser_type == 12) { // Spread
-			weapon_speed = 200 * F1_0; 
-		} 
+	if( using_original_d1_weapons()) {
+		if(laser_type == SPREADFIRE_ID) { // Spread
+			weapon_speed = 200 * F1_0;
+		} else if(laser_type == LASER_ID_L6) { // Laser 6 travels 5% faster
+			weapon_speed = fixmuldiv(weapon_speed, 21, 20);
+		}
 	}
 
 	//	If supposed to fire at a delayed time (delay_time), then move this point backwards.
@@ -1435,7 +1481,10 @@ void Flare_create(object *obj)
 
 		#ifdef NETWORK
 		if (Game_mode & GM_MULTI)
+		{
 			multi_send_fire(FLARE_ADJUST, 0, 0, 1, -1);
+			multi_send_ship_status();
+		}
 		#endif
 // -- 	}
 
@@ -1531,8 +1580,12 @@ void Laser_do_weapon_sequence(object *obj, int doHomerFrame, fix idealHomerFrame
 
 					dist_to_player = vm_vec_dist_quick(&obj->pos, &Objects[track_goal].pos);
 					if ((dist_to_player < Players[Player_num].homing_object_dist) || (Players[Player_num].homing_object_dist < 0))
+					{
 						Players[Player_num].homing_object_dist = dist_to_player;
 
+						if (Game_mode & GM_MULTI)
+							multi_send_ship_status();
+					}
 				}
 			}
 
@@ -1543,15 +1596,15 @@ void Laser_do_weapon_sequence(object *obj, int doHomerFrame, fix idealHomerFrame
 
 				vm_vec_normalize_quick(&vector_to_object);
 				temp_vec = obj->mtype.phys_info.velocity;
-				speed = vm_vec_normalize(&temp_vec);
+				speed = vm_vec_normalize_quick(&temp_vec);
 				max_speed = Weapon_info[obj->id].speed[Difficulty_level];
-				if( (Game_mode & GM_MULTI) && Netgame.OriginalD1Weapons) {
-					if(obj->id == 12) { // Spread
+				if( using_original_d1_weapons()) {
+					if(obj->id == SPREADFIRE_ID) { // Spread
 						max_speed = 200 * F1_0; 
 					} 
 				}
 				if (speed+F1_0 < max_speed) {
-					speed += fixmul(max_speed, FrameTime/2);
+					speed += fixmul(max_speed, idealHomerFrameTime/2);
 					if (speed > max_speed)
 						speed = max_speed;
 				}
@@ -1564,7 +1617,7 @@ void Laser_do_weapon_sequence(object *obj, int doHomerFrame, fix idealHomerFrame
 				//	The boss' smart children track better...
 				if (Weapon_info[obj->id].render_type != WEAPON_RENDER_POLYMODEL)
 					vm_vec_add2(&temp_vec, &vector_to_object);
-				vm_vec_normalize(&temp_vec);
+				vm_vec_normalize_quick(&temp_vec);
 				vm_vec_scale(&temp_vec, speed);
 				obj->mtype.phys_info.velocity = temp_vec;
 
@@ -1628,10 +1681,12 @@ void Laser_do_weapon_sequence(object *obj, int doHomerFrame, fix idealHomerFrame
 		fix	weapon_speed;
 
 		fix max_weapon_speed = Weapon_info[obj->id].speed[Difficulty_level];
-		if( (Game_mode & GM_MULTI) && Netgame.OriginalD1Weapons) {
-			if(obj->id == 12) { // Spread
-				max_weapon_speed = 200 * F1_0; 
-			} 
+		if( using_original_d1_weapons()) {
+			if(obj->id == SPREADFIRE_ID) { // Spread
+				max_weapon_speed = 200 * F1_0;
+			} else if(obj->id == LASER_ID_L6) { // Laser 6 travels 5% faster
+				max_weapon_speed = fixmuldiv(max_weapon_speed, 21, 20);
+			}
 		}
 
 		weapon_speed = vm_vec_mag_quick(&obj->mtype.phys_info.velocity);
@@ -1654,7 +1709,7 @@ extern int Player_fired_laser_this_frame;
 //	--------------------------------------------------------------------------------------------------
 // Assumption: This is only called by the actual console player, not for network players
 
-int do_laser_firing_player(void)
+void do_laser_firing_player(void)
 {
 	player	*plp = &Players[Player_num];
 	fix		energy_used;
@@ -1666,11 +1721,11 @@ int do_laser_firing_player(void)
 	static int Helix_orientation = 0;
 
 	if (Player_is_dead)
-		return 0;
+		return;
 
-	weapon_index = Primary_weapon_to_weapon_info[Primary_weapon];
+	weapon_index = Primary_weapon_to_weapon_info[Players[Player_num].primary_weapon];
 	energy_used = Weapon_info[weapon_index].energy_usage;
-	if (Primary_weapon == OMEGA_INDEX)
+	if (Players[Player_num].primary_weapon == OMEGA_INDEX)
 		energy_used = 0;	//	Omega consumes energy when recharging, not when firing.
 
 	if (Difficulty_level < 2)
@@ -1683,7 +1738,7 @@ int do_laser_firing_player(void)
 
 	ammo_used = Weapon_info[weapon_index].ammo_usage;
 
-	primary_ammo = (Primary_weapon == GAUSS_INDEX)?(plp->primary_ammo[VULCAN_INDEX]):(plp->primary_ammo[Primary_weapon]);
+	primary_ammo = (Players[Player_num].primary_weapon == GAUSS_INDEX)?(plp->primary_ammo[VULCAN_INDEX]):(plp->primary_ammo[Players[Player_num].primary_weapon]);
 
 	if	(!((plp->energy >= energy_used) && (primary_ammo >= ammo_used)))
 		auto_select_weapon(0);		//	Make sure the player can fire from this weapon.
@@ -1697,22 +1752,28 @@ int do_laser_firing_player(void)
 
                         Last_laser_fired_time = GameTime64;
 
-			if (!cheats.rapidfire)
-				Next_laser_fire_time = GameTime64 + Weapon_info[weapon_index].fire_wait - fire_frame_overhead;
-			else
+			if (!cheats.rapidfire) {
+				fix fire_wait = Weapon_info[weapon_index].fire_wait;
+
+				// "Original D1 Weapons": Laser 5 fires 5% faster (0.25 s -> about 0.238 s)
+				if (using_original_d1_weapons() && Players[Player_num].primary_weapon == LASER_INDEX && player_laser_fire_level() == MAX_LASER_LEVEL+1)
+					fire_wait = fixmuldiv(fire_wait, 20, 21);
+
+				Next_laser_fire_time = GameTime64 + fire_wait - fire_frame_overhead;
+			} else
 				Next_laser_fire_time = GameTime64 + (F1_0/25) - fire_frame_overhead;
 
-			laser_level = Players[Player_num].laser_level;
+			laser_level = player_laser_fire_level();	// one below your highest if you stepped down with the laser key
 
 			flags = 0;
 
-			if (Primary_weapon == SPREADFIRE_INDEX) {
+			if (Players[Player_num].primary_weapon == SPREADFIRE_INDEX) {
 				if (Spreadfire_toggle)
 					flags |= LASER_SPREADFIRE_TOGGLED;
 				Spreadfire_toggle = !Spreadfire_toggle;
 			}
 
-			if (Primary_weapon == HELIX_INDEX) {
+			if (Players[Player_num].primary_weapon == HELIX_INDEX) {
 				Helix_orientation++;
 				flags |= ((Helix_orientation & LASER_HELIX_MASK) << LASER_HELIX_SHIFT);
 			}
@@ -1720,13 +1781,13 @@ int do_laser_firing_player(void)
 			if (Players[Player_num].flags & PLAYER_FLAGS_QUAD_LASERS)
 				flags |= LASER_QUAD;
 
-			rval += do_laser_firing(Players[Player_num].objnum, Primary_weapon, laser_level, flags, nfires, Objects[Players[Player_num].objnum].orient.fvec);
+			rval += do_laser_firing(Players[Player_num].objnum, Players[Player_num].primary_weapon, laser_level, flags, nfires, Objects[Players[Player_num].objnum].orient.fvec);
 
 			int warning_increment = 250/12;
 			int pre_ammo = plp->primary_ammo[VULCAN_INDEX];
 			int post_ammo = plp->primary_ammo[VULCAN_INDEX] - ammo_used; 
 
-			if((Primary_weapon == VULCAN_INDEX || Primary_weapon == GAUSS_INDEX) && PlayerCfg.VulcanAmmoWarnings) {
+			if((Players[Player_num].primary_weapon == VULCAN_INDEX || Players[Player_num].primary_weapon == GAUSS_INDEX) && PlayerCfg.VulcanAmmoWarnings) {
 				if(pre_ammo >= warning_increment*4 && post_ammo < warning_increment*4) {
 					HUD_init_message_literal(HM_MULTI, "Vulcan ammo warning."); 
 					digi_play_sample(SOUND_BAD_SELECTION, F1_0);
@@ -1746,7 +1807,7 @@ int do_laser_firing_player(void)
 			pre_ammo = (Players[Player_num].energy)/F1_0; 
 			post_ammo = (Players[Player_num].energy - (energy_used * rval) / Weapon_info[weapon_index].fire_count)/F1_0; 
 			warning_increment = 5; 
-			if(Primary_weapon != VULCAN_INDEX && Primary_weapon != GAUSS_INDEX && PlayerCfg.VulcanAmmoWarnings) {
+			if(Players[Player_num].primary_weapon != VULCAN_INDEX && Players[Player_num].primary_weapon != GAUSS_INDEX && PlayerCfg.VulcanAmmoWarnings) {
 			
 				if(pre_ammo >= warning_increment*4 && post_ammo < warning_increment*4) {
 					HUD_init_message_literal(HM_MULTI, "Energy warning."); 
@@ -1770,7 +1831,7 @@ int do_laser_firing_player(void)
 			if (plp->energy < 0)
 				plp->energy = 0;
 
-			if ((Primary_weapon == VULCAN_INDEX) || (Primary_weapon == GAUSS_INDEX)) {
+			if ((Players[Player_num].primary_weapon == VULCAN_INDEX) || (Players[Player_num].primary_weapon == GAUSS_INDEX)) {
 				if (ammo_used > plp->primary_ammo[VULCAN_INDEX])
 					plp->primary_ammo[VULCAN_INDEX] = 0;
 				else
@@ -1795,6 +1856,8 @@ int do_laser_firing_player(void)
 
 			auto_select_weapon(0);		//	Make sure the player can fire from this weapon.
 
+			if (Game_mode & GM_MULTI)
+				multi_send_ship_status();
 		} else {
 			auto_select_weapon(0);		//	Make sure the player can fire from this weapon.
 			Next_laser_fire_time = GameTime64;	//	Prevents shots-to-fire from building up.
@@ -1804,7 +1867,7 @@ int do_laser_firing_player(void)
 
 	Global_laser_firing_count = 0;
 
-	return rval;
+	return;
 }
 
 //	--------------------------------------------------------------------------------------------------
@@ -1957,12 +2020,12 @@ int do_laser_firing(int objnum, int weapon_num, int level, int flags, int nfires
 			break;
 
 		case OMEGA_INDEX:
-			Laser_player_fire( objp, OMEGA_ID, 1, 1, 0, shot_orientation);
+			Laser_player_fire( objp, OMEGA_ID, 6, 1, 0, shot_orientation);
 			break;
 
 		default:
 			Int3();	//	Contact Yuan: Unknown Primary weapon type, setting to 0.
-			Primary_weapon = 0;
+			Players[Player_num].primary_weapon = 0;
 	}
 
 	// Set values to be recognized during comunication phase, if we are the
@@ -2144,7 +2207,7 @@ void do_missile_firing(int drop_bomb)
 {
 	int gun_flag=0;
 	int bomb = which_bomb();
-	int weapon = (drop_bomb) ? bomb : Secondary_weapon;
+	int weapon = (drop_bomb) ? bomb : Players[Player_num].secondary_weapon;
 	fix fire_frame_overhead = 0;
 
 	Network_laser_track = -1;
@@ -2230,8 +2293,10 @@ void do_missile_firing(int drop_bomb)
 #endif
 
 		// don't autoselect if dropping prox and prox not current weapon
-		if (!drop_bomb || Secondary_weapon == bomb)
+		if (!drop_bomb || Players[Player_num].secondary_weapon == bomb)
 			auto_select_weapon(1);		//select next missile, if this one out of ammo
+
+		if (Game_mode & GM_MULTI)
+			multi_send_ship_status();
 	}
 }
-

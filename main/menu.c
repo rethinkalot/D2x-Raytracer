@@ -24,6 +24,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "inferno.h"
 #include "game.h"
 #include "gr.h"
+#include "xmodel.h"
 #include "key.h"
 #include "mouse.h"
 #include "iff.h"
@@ -410,8 +411,17 @@ void draw_copyright()
 	gr_set_curfont(GAME_FONT);
 	gr_set_fontcolor(BM_XRGB(6,6,6),-1);
 	gr_string(0x8000,SHEIGHT-LINE_SPACING,TXT_COPYRIGHT);
-	gr_set_fontcolor( BM_XRGB(25,0,0), -1);
-	gr_string(0x8000,SHEIGHT-(LINE_SPACING*2),GameArg.SysOpenVR ? DESCENT_VERSION VERSION_EXTRA_MAIN_SCREEN_VR : DESCENT_VERSION VERSION_EXTRA_MAIN_SCREEN);
+	{
+		// The title palette has no true red (any red lands on orange). OGL reads the text colour from
+		// gr_current_pal at draw time, so set one entry to exact red (DEMO RECORDING's 27,0,0) just for this line.
+		int c = BM_XRGB(27,0,0);
+		ubyte saved[3];
+		memcpy(saved, &gr_current_pal[c*3], 3);
+		gr_current_pal[c*3] = 54; gr_current_pal[c*3+1] = 0; gr_current_pal[c*3+2] = 0;
+		gr_set_fontcolor(c, -1);
+		gr_string(0x8000,SHEIGHT-(LINE_SPACING*2),GameArg.SysOpenVR ? DESCENT_VERSION VERSION_EXTRA_MAIN_SCREEN_VR : DESCENT_VERSION VERSION_EXTRA_MAIN_SCREEN);
+		memcpy(&gr_current_pal[c*3], saved, 3);
+	}
 }
 
 //returns the number of demo files on the disk
@@ -447,7 +457,7 @@ int main_menu_handler(newmenu *menu, d_event *event, int *menu_choice )
 			break;
 
 		case EVENT_IDLE:
-			if ( /*keyd_time_when_last_pressed+i2f(25) < timer_query() ||*/ GameArg.SysAutoDemo  )
+			if ( /*keyd_time_when_last_pressed+i2f(25) < timer_query() || */ GameArg.SysAutoDemo  )
 			{
 				int n_demos;
 				n_demos = newdemo_count_demos();
@@ -528,7 +538,10 @@ void create_main_menu(newmenu_item *m, int *menu_choice, int *callers_num_option
 		ADD_ITEM("  Editor", MENU_EDITOR, KEY_E);
 		#endif
 	}
-	ADD_ITEM("  SANDBOX", MENU_SANDBOX, -1);
+	/* The sandbox viewers are developer tools, so only offer them when the
+	 * game was started with -debug. */
+	if (GameArg.DbgVerbose >= CON_DEBUG)
+		ADD_ITEM("  SANDBOX", MENU_SANDBOX, -1);
 	#endif
 
 	*callers_num_options = num_options;
@@ -541,17 +554,24 @@ int DoMenu()
 	newmenu_item *m;
 	int num_options = 0;
 
-	CALLOC(menu_choice, int, 25);
+	MALLOC(menu_choice, int, 25);
 	if (!menu_choice)
 		return -1;
-	CALLOC(m, newmenu_item, 25);
+	MALLOC(m, newmenu_item, 25);
 	if (!m)
 	{
 		d_free(menu_choice);
 		return -1;
 	}
 
+	memset(menu_choice, 0, sizeof(int)*25);
+	memset(m, 0, sizeof(newmenu_item)*25);
+
 	create_main_menu(m, menu_choice, &num_options); // may have to change, eg, maybe selected pilot and no save games.
+
+	// Nudge the main menu slightly right of centre. Authored in pixels against the
+	// background art; scaled to the canvas width at runtime.
+	newmenu_set_x_nudge(15);
 
 	newmenu_do3( "", NULL, num_options, m, (int (*)(newmenu *, d_event *, void *))main_menu_handler, menu_choice, 0, Menu_pcx_name);
 
@@ -856,6 +876,7 @@ void input_config();
 void change_res();
 void graphics_config();
 void do_misc_menu();
+void do_obs_menu();
 
 int options_menuset(newmenu *menu, d_event *event, void *userdata)
 {
@@ -874,6 +895,7 @@ int options_menuset(newmenu *menu, d_event *event, void *userdata)
 				case  7: ReorderPrimary();		break;
 				case  8: ReorderSecondary();		break;
 				case  9: do_misc_menu();		break;
+				case 10: do_obs_menu();         break;
 			}
 			return 1;	// stay in menu until escape
 			break;
@@ -903,92 +925,385 @@ int gcd(int a, int b)
 	return gcd(b, a%b);
 }
 
-void change_res()
+// Screen Resolution menu. "use custom values" is a checkbox: while it is ticked the aspect field is a
+// live filter on the list, custom resolutions autofill to that shape and up to 2 of them stay in the
+// list. Unticking it clears all that and puts the menu back to default. Saved in descent.cfg.
+#define RES_REBUILD_TOGGLE 1 // the checkbox changed
+#define RES_REBUILD_ASPECT 2 // Enter on the aspect field
+static int res_opt_custom, res_opt_res, res_opt_aspect, res_num_list, res_opt_fullscr, res_opt_borderless, res_apply_window;
+static int res_rebuild, res_focus, res_apply_custom, res_enter_item;
+static int res_click_ticked = -1; // the resolution that was ticked when the mouse button went down
+// The highlighted item, kept across rebuilds: a list line by its index, an item below the list by
+// its place after the list, so the cursor stays on the same field when the list grows or shrinks
+#define RES_FOCUS(citem) ((citem) < res_num_list ? (citem) : 1000 + (citem) - res_num_list)
+
+// Reads "16x9", "16:9" or "1600x900" into a and b; 0 if it isn't a pair of positive numbers
+static int res_parse_pair(const char *s, int *a, int *b)
 {
-	u_int32_t modes[50], new_mode = 0;
-	int i = 0, mc = 0, num_presets = 0, citem = -1, opt_cval = -1, opt_fullscr = -1;
+	const char *sep = strpbrk(s, "xX:");
+	if (!sep)
+		return 0;
+	*a = atoi(s);
+	*b = atoi(sep + 1);
+	return *a > 0 && *b > 0;
+}
 
-	num_presets = gr_list_modes( modes );
+// Whether a mode has the filter's shape, within 3% (1360x768 counts as 16:9, 2560x1080 as 21:9)
+static int res_in_filter(u_int32_t mode)
+{
+	float want, got;
+	if (!GameCfg.ResCustom || !GameCfg.ResFilterW || !GameCfg.ResFilterH)
+		return 1;
+	want = (float)GameCfg.ResFilterW / GameCfg.ResFilterH;
+	got = (float)SM_W(mode) / SM_H(mode);
+	return got >= want * 0.97f && got <= want * 1.03f;
+}
 
+// The shapes the arrow keys step through in the aspect field; 0x0 = every shape
+static const char *const res_aspect_presets[] = { "0x0", "4x3", "5x4", "16x10", "16x9", "21x9" };
+#define RES_NUM_ASPECT_PRESETS (sizeof(res_aspect_presets) / sizeof(res_aspect_presets[0]))
+
+// Common 16:9 and 16:10 sizes always offered in the list (monitors rarely list them; they work windowed)
+static const u_int32_t res_small_wide[] = { SM(960, 540), SM(854, 480),
+	SM(1024, 640), SM(1152, 720), SM(1280, 800), SM(1440, 900), SM(1680, 1050) };
+#define RES_NUM_SMALL_WIDE (sizeof(res_small_wide) / sizeof(res_small_wide[0]))
+
+// The modes the monitor lists, while the menu is open (the arrows in the resolution field step through them)
+static const u_int32_t *res_all_modes;
+static int res_all_n;
+
+// 1 while the aspect field is 0x0: the aspect then follows the typed resolution instead of filling it
+static int res_aspect_auto;
+
+
+// Fills the other side of the resolution for the filter's shape, from what has been typed so far
+// (the text before the edit position):
+// - a width: 555 -> 555x312, edit position stays after the width
+// - past the x (typed x, or the right arrow), a height: x312 -> 555x312, edit position stays at the end
+// so typing and backspace carry on from there.
+static void res_autofill(newmenu_item *it, int aw, int ah)
+{
+	char digits[6], *x;
+	int i, n = 0, len = (it->value < 0) ? (int)strlen(it->text) : it->value;
+
+	it->text[len] = 0;
+	x = strpbrk(it->text, "xX");
+	for (i = x ? (int)(x - it->text) + 1 : 0; it->text[i] && n < 5; i++)
+		if (it->text[i] >= '0' && it->text[i] <= '9')
+			digits[n++] = it->text[i];
+	digits[n] = 0;
+
+	if (x) // the height was typed: fill in the width
 	{
-	newmenu_item m[50+8];
-	char restext[50][12], crestext[12], casptext[12];
-
-	for (i = 0; i <= num_presets-1; i++)
-	{
-		snprintf(restext[mc], sizeof(restext[mc]), "%ix%i", SM_W(modes[i]), SM_H(modes[i]));
-		m[mc].type = NM_TYPE_RADIO;
-		m[mc].text = restext[mc];
-		m[mc].value = ((citem == -1) && (Game_screen_mode == modes[i]) && GameCfg.AspectY == SM_W(modes[i])/gcd(SM_W(modes[i]),SM_H(modes[i])) && GameCfg.AspectX == SM_H(modes[i])/gcd(SM_W(modes[i]),SM_H(modes[i])));
-		m[mc].group = 0;
-		if (m[mc].value)
-			citem = mc;
-		mc++;
+		if (n)
+			snprintf(it->text, it->text_len + 1, "%ix%s", (atoi(digits) * aw + ah / 2) / ah, digits);
+		else
+			x[1] = 0; // just the x so far: keep the width, wait for the height
+		it->value = strlen(it->text);
 	}
+	else // the width was typed: fill in the height
+	{
+		if (n)
+			snprintf(it->text, it->text_len + 1, "%sx%i", digits, (atoi(digits) * ah + aw / 2) / aw);
+		else
+			it->text[0] = 0;
+		it->value = n;
+	}
+}
 
-	m[mc].type = NM_TYPE_TEXT; m[mc].text = ""; mc++; // little space for overview
-	// the fields for custom resolution and aspect
-	opt_cval = mc;
-	m[mc].type = NM_TYPE_RADIO; m[mc].text = "use custom values"; m[mc].value = (citem == -1); m[mc].group = 0; mc++;
-	m[mc].type = NM_TYPE_TEXT; m[mc].text = "resolution:"; mc++;
-	snprintf(crestext, sizeof(crestext), "%ix%i", SM_W(Game_screen_mode), SM_H(Game_screen_mode));
-	m[mc].type = NM_TYPE_INPUT; m[mc].text = crestext; m[mc].text_len = 11; modes[mc] = 0; mc++;
-	m[mc].type = NM_TYPE_TEXT; m[mc].text = "aspect:"; mc++;
-	snprintf(casptext, sizeof(casptext), "%ix%i", GameCfg.AspectY, GameCfg.AspectX);
-	m[mc].type = NM_TYPE_INPUT; m[mc].text = casptext; m[mc].text_len = 11; modes[mc] = 0; mc++;
-	m[mc].type = NM_TYPE_TEXT; m[mc].text = ""; mc++; // little space for overview
-	// fullscreen
-	opt_fullscr = mc;
-	m[mc].type = NM_TYPE_CHECK; m[mc].text = "Fullscreen"; m[mc].value = gr_check_fullscreen(); mc++;
+// The shape in the aspect field, if it holds one and isn't following the typed resolution
+static int res_field_aspect(newmenu_item *items, int *aw, int *ah)
+{
+	return !res_aspect_auto && res_parse_pair(items[res_opt_aspect].text, aw, ah);
+}
 
-	// create the menu
-	newmenu_do1(NULL, "Screen Resolution", mc, m, NULL, NULL, 0);
+// Re-fills the resolution field from its width after the aspect changed
+static void res_refill(newmenu_item *items)
+{
+	newmenu_item *it = &items[res_opt_res];
+	char *x = strpbrk(it->text, "xX");
+	int aw, ah;
 
-	// menu is done, now do what we need to do
+	if (!res_field_aspect(items, &aw, &ah))
+		return;
+	it->value = x ? (int)(x - it->text) : (int)strlen(it->text);
+	res_autofill(it, aw, ah);
+	it->value = -1; // the next key typed starts over, as on entering the field
+}
 
-	// check which resolution field was selected
-	for (i = 0; i <= mc; i++)
-		if ((m[i].type == NM_TYPE_RADIO) && (m[i].group==0) && (m[i].value == 1))
+// The next bigger (up) or smaller known size of the aspect field's shape (any shape at 0x0), from
+// the monitor's modes, the common sizes and your custom ones, put in the resolution field
+static void res_step(newmenu_item *items, int up)
+{
+	newmenu_item *it = &items[res_opt_res];
+	char *x = strpbrk(it->text, "xX");
+	int cw = atoi(it->text), ch = x ? atoi(x + 1) : 0, aw, ah, shape, k, n;
+	long cur, a, best_a = 0;
+	u_int32_t cand, best = 0;
+
+	shape = res_field_aspect(items, &aw, &ah);
+	if (!ch && shape)
+		ch = cw * ah / aw;
+	cur = (long)cw * ch;
+	n = res_all_n + RES_NUM_SMALL_WIDE + 2;
+	for (k = 0; k < n; k++)
+	{
+		cand = (k < res_all_n) ? res_all_modes[k] : (k < res_all_n + (int)RES_NUM_SMALL_WIDE) ? res_small_wide[k - res_all_n] :
+			(GameCfg.ResCustom ? GameCfg.ResExtra[k - res_all_n - RES_NUM_SMALL_WIDE] : 0);
+		if (!cand)
+			continue;
+		if (shape) // within 3% of the shape, like the list filter
+		{
+			float want = (float)aw / ah, got = (float)SM_W(cand) / SM_H(cand);
+			if (got < want * 0.97f || got > want * 1.03f)
+				continue;
+		}
+		a = (long)SM_W(cand) * SM_H(cand);
+		if (up ? (a > cur && (!best || a < best_a)) : (a < cur && (!best || a > best_a)))
+		{
+			best = cand;
+			best_a = a;
+		}
+	}
+	if (!best)
+		return;
+	snprintf(it->text, it->text_len + 1, "%ix%i", SM_W(best), SM_H(best));
+	it->value = up ? (int)strlen(it->text) : 0; // the cursor stays at the end it stepped from
+	if (res_aspect_auto) // 0x0: the aspect follows the resolution
+		snprintf(items[res_opt_aspect].text, items[res_opt_aspect].text_len + 1, "%ix%i", SM_W(best) / gcd(SM_W(best), SM_H(best)), SM_H(best) / gcd(SM_W(best), SM_H(best)));
+}
+
+// The resolution field edits like a normal text box: the arrows, Home and End move the cursor, typing
+// inserts at it, Backspace and Delete remove. Right at the end steps to the next bigger size of the
+// aspect's shape, left at the start to the next smaller. Editing the width fills in the height from
+// the aspect as you type digits; deleting never refills. A height you type yourself is kept. Returns 0 for keys the menu handles (Enter, Esc, up, down).
+static int res_field_key(newmenu_item *items, int key)
+{
+	newmenu_item *it = &items[res_opt_res];
+	int len = strlen(it->text), cur = (it->value < 0 || it->value > len) ? len : it->value, ascii, aw, ah, typed = 0;
+	char *x;
+
+	if (key == (KEY_DELETE | KEY_DEBUGGED)) // the key handler marks keys pressed while Delete is down, Delete itself too
+		key = KEY_DELETE;
+	switch (key)
+	{
+		case KEY_LEFT: case KEY_PAD4:
+			if (cur > 0)
+				it->value = cur - 1;
+			else
+				res_step(items, 0);
+			return 1;
+		case KEY_RIGHT: case KEY_PAD6:
+			if (cur < len)
+				it->value = cur + 1;
+			else
+				res_step(items, 1);
+			return 1;
+		case KEY_HOME:
+			it->value = 0;
+			return 1;
+		case KEY_END:
+			it->value = len;
+			return 1;
+		case KEY_BACKSP:
+			if (cur == 0)
+				return 1;
+			memmove(it->text + cur - 1, it->text + cur, len - cur + 1);
+			cur--;
+			break;
+		case KEY_DELETE:
+			if (cur == len)
+				return 1;
+			memmove(it->text + cur, it->text + cur + 1, len - cur);
+			break;
+		case KEY_ENTER: case KEY_PADENTER: case KEY_ESC: case KEY_UP: case KEY_DOWN: case KEY_PAD8: case KEY_PAD2:
+		case KEY_TAB: case KEY_PAGEUP: case KEY_PAGEDOWN:
+			return 0;
+		default:
+			ascii = key_ascii();
+			if (ascii == 255)
+				return 0;
+			if (ascii == 'x' || ascii == 'X')
+			{
+				if ((x = strpbrk(it->text, "xX"))) // already has its x: jump past it
+				{
+					it->value = (int)(x - it->text) + 1;
+					return 1;
+				}
+				ascii = 'x';
+			}
+			else if (ascii < '0' || ascii > '9')
+				return 1; // digits and x only
+			if (len >= it->text_len)
+				return 1;
+			memmove(it->text + cur + 1, it->text + cur, len - cur + 1);
+			it->text[cur++] = ascii;
+			typed = (ascii != 'x');
+			break;
+	}
+	it->value = cur;
+	x = strpbrk(it->text, "xX");
+	if (res_field_aspect(items, &aw, &ah))
+	{
+		if (typed && (!x || cur <= (int)(x - it->text)) && atoi(it->text) > 0) // a digit typed in the width: the height follows the shape (deleting just deletes)
+			snprintf(it->text, it->text_len + 1, "%ix%i", atoi(it->text), (atoi(it->text) * ah + aw / 2) / aw);
+	}
+	else if (res_aspect_auto && res_parse_pair(it->text, &aw, &ah)) // 0x0: the aspect follows the resolution
+		snprintf(items[res_opt_aspect].text, items[res_opt_aspect].text_len + 1, "%ix%i", aw / gcd(aw, ah), ah / gcd(aw, ah));
+	return 1;
+}
+
+static int change_res_handler(newmenu *menu, d_event *event, void *userdata)
+{
+	newmenu_item *items = newmenu_get_items(menu);
+	int citem = newmenu_get_citem(menu), i, aw, ah, key;
+
+	userdata = userdata;
+
+	switch (event->type)
+	{
+		// Mouse: a click ticks a resolution; a click on the one already ticked applies it, like Enter
+		case EVENT_MOUSE_BUTTON_DOWN:
+			if (event_mouse_get_button(event) == MBTN_LEFT)
+				for (res_click_ticked = -1, i = 0; i < res_num_list; i++)
+					if (items[i].value)
+						res_click_ticked = i;
 			break;
 
+		case EVENT_MOUSE_BUTTON_UP:
+			if (event_mouse_get_button(event) == MBTN_LEFT && citem < res_num_list && citem == res_click_ticked && items[citem].value)
+			{
+				res_focus = RES_FOCUS(citem);
+				res_enter_item = citem;
+				window_close(newmenu_get_window(menu));
+				return 1;
+			}
+			break;
+
+		case EVENT_KEY_COMMAND:
+			key = event_key_get(event);
+			if (citem == res_opt_aspect && (key == KEY_LEFT || key == KEY_PAD4 || key == KEY_RIGHT || key == KEY_PAD6))
+			{
+				// arrows step through the preset shapes
+				int idx = -1, n = RES_NUM_ASPECT_PRESETS, w = 0, h = 0, pw, ph;
+				res_parse_pair(items[citem].text, &w, &h);
+				for (i = 0; i < n; i++)
+				{
+					if (!res_parse_pair(res_aspect_presets[i], &pw, &ph))
+						pw = ph = 0;
+					if ((w == 0 && pw == 0) || (w && pw && w * ph == h * pw))
+						idx = i;
+				}
+				if (key == KEY_RIGHT || key == KEY_PAD6)
+					idx = (idx + 1) % n;
+				else
+					idx = (idx < 0) ? n - 1 : (idx + n - 1) % n;
+				strcpy(items[citem].text, res_aspect_presets[idx]);
+				items[citem].value = -1;
+				res_aspect_auto = (idx == 0);
+				res_refill(items);
+				return 1;
+			}
+			if (citem == res_opt_res)
+				return res_field_key(items, key);
+			break;
+
+		case EVENT_NEWMENU_CHANGED:
+			if (citem == res_opt_custom) // ticked or unticked: rebuild the menu for it
+			{
+				res_rebuild = RES_REBUILD_TOGGLE;
+				res_focus = RES_FOCUS(citem);
+				window_close(newmenu_get_window(menu));
+				return 1;
+			}
+			if (citem == res_opt_aspect) // typed a shape: the resolution follows it; typed 0x0: the other way round
+			{
+				if (res_parse_pair(items[citem].text, &aw, &ah))
+				{
+					res_aspect_auto = 0;
+					res_refill(items);
+				}
+				else if (strpbrk(items[citem].text, "xX:") && atoi(items[citem].text) == 0)
+					res_aspect_auto = 1;
+			}
+			break;
+
+		case EVENT_NEWMENU_SELECTED: // Enter. Only the ticked, highlighted resolution changes the screen.
+			res_focus = RES_FOCUS(citem);
+			if (citem == res_opt_custom)
+			{
+				items[citem].value = !items[citem].value;
+				res_rebuild = RES_REBUILD_TOGGLE;
+			}
+			else if (citem == res_opt_aspect)
+				res_rebuild = RES_REBUILD_ASPECT;
+			else if (citem == res_opt_res)
+			{
+				if (items[res_opt_custom].value)
+					res_apply_custom = 1; // box ticked: apply the typed resolution
+				else
+				{
+					items[res_opt_custom].value = 1; // box unticked: tick it first
+					res_rebuild = RES_REBUILD_TOGGLE;
+				}
+			}
+			else if (citem < res_num_list)
+			{
+				if (items[citem].value)
+					res_enter_item = citem; // already ticked: apply it
+				else
+				{
+					for (i = 0; i < res_num_list; i++) // not ticked yet: tick it and stay
+						items[i].value = (i == citem);
+					return 1;
+				}
+			}
+			else if (citem == res_opt_fullscr || citem == res_opt_borderless)
+			{
+				// Space ticks and unticks. Enter on a ticked box applies it. Enter on an empty box does
+				// nothing, but two quick Enters tick it and apply it, like a double click.
+				static fix64 last_enter;
+				static int last_item = -1;
+				fix64 now = timer_query();
+
+				if (!items[citem].value)
+				{
+					if (last_item != citem || now - last_enter > F1_0 / 2)
+					{
+						last_item = citem;
+						last_enter = now;
+						return 1;
+					}
+					items[citem].value = 1;
+				}
+				last_item = -1;
+				res_apply_window = 1;
+			}
+			else
+				return 1; // anything else: stay in the menu
+			break;
+
+		default:
+			break;
+	}
+	return 0;
+}
+
+// Applies a screen mode plus the fullscreen and borderless settings
+static void res_apply(u_int32_t new_mode, int fullscr, int borderless)
+{
+	int cur_borderless = GameCfg.BorderlessWindow;
+
+	GameCfg.BorderlessWindow = borderless;
+
 	// now check for fullscreen toggle and apply if necessary
-	if (m[opt_fullscr].value != gr_check_fullscreen())
+	if (fullscr != gr_check_fullscreen())
 		gr_toggle_fullscreen();
-
-	if (i == opt_cval) // set custom resolution and aspect
-	{
-		u_int32_t cmode = Game_screen_mode, casp = Game_screen_mode;
-
-		if (!strchr(crestext, 'x'))
-			return;
-
-		cmode = SM(atoi(crestext), atoi(strchr(crestext, 'x')+1));
-		if (SM_W(cmode) < 320 || SM_H(cmode) < 200) // oh oh - the resolution is too small. Revert!
-		{
-			nm_messagebox( TXT_WARNING, 1, "OK", "Entered resolution is too small.\nReverting ..." );
-			cmode = new_mode;
-		}
-
-		casp = cmode;
-		if (strchr(casptext, 'x')) // we even have a custom aspect set up
-		{
-			casp = SM(atoi(casptext), atoi(strchr(casptext, 'x')+1));
-		}
-		GameCfg.AspectY = SM_W(casp)/gcd(SM_W(casp),SM_H(casp));
-		GameCfg.AspectX = SM_H(casp)/gcd(SM_W(casp),SM_H(casp));
-		new_mode = cmode;
-	}
-	else if (i >= 0 && i < num_presets) // set preset resolution
-	{
-		new_mode = modes[i];
-		GameCfg.AspectY = SM_W(new_mode)/gcd(SM_W(new_mode),SM_H(new_mode));
-		GameCfg.AspectX = SM_H(new_mode)/gcd(SM_W(new_mode),SM_H(new_mode));
-	}
 
 	// clean up and apply everything
 	newmenu_free_background();
 	set_screen_mode(SCREEN_MENU);
-	if (new_mode != Game_screen_mode)
+	if (new_mode != Game_screen_mode || cur_borderless != borderless)
 	{
 		gr_set_mode(new_mode);
 		Game_screen_mode = new_mode;
@@ -1000,18 +1315,465 @@ void change_res()
 		}
 	}
 	game_init_render_buffers(SM_W(Game_screen_mode), SM_H(Game_screen_mode));
+}
+
+// The resolution list as shown in the menu, for counting steps above the monitor (NULL outside the menu)
+static const u_int32_t *res_steps;
+static int res_steps_n;
+
+// Whether a mode is too far above the monitor's own size to open without asking. Going up the list
+// from the monitor's size, the next two sizes open straight away and the third asks first (a typed
+// size counts by where it would sit in the list). Anything more than 1.5x the monitor on a side asks too.
+// The monitor's size is the screen the window is on; before there is a window, the largest listed mode.
+static int res_too_big(u_int32_t mode, const u_int32_t *modes, int n, int *maxw, int *maxh)
+{
+	const u_int32_t *list = res_steps ? res_steps : modes;
+	int i, nlist = res_steps ? res_steps_n : n, steps = 0;
+	long area = (long)SM_W(mode) * SM_H(mode), native;
+
+	if (!gr_monitor_size(maxw, maxh))
+	{
+		*maxw = *maxh = 0;
+		for (i = 0; i < n; i++)
+		{
+			if (SM_W(modes[i]) > *maxw)
+				*maxw = SM_W(modes[i]);
+			if (SM_H(modes[i]) > *maxh)
+				*maxh = SM_H(modes[i]);
+		}
+		if (!*maxw)
+			return 0;
+	}
+	native = (long)*maxw * *maxh;
+	if (area <= native)
+		return 0;
+	for (i = 0; i < nlist; i++) // listed sizes between the monitor's and this one
+	{
+		long a = (long)SM_W(list[i]) * SM_H(list[i]);
+		if (a > native && a < area)
+			steps++;
+	}
+	return steps >= 2 || SM_W(mode) * 2 > *maxw * 3 || SM_H(mode) * 2 > *maxh * 3;
+}
+
+// Startup: a saved resolution far bigger than the monitor isn't opened straight away. The game
+// starts at the default 960x540 and asks, once menus can show, whether to go back to it.
+static u_int32_t res_startup_big;
+
+void res_startup_check(void) // before the first gr_set_mode
+{
+	u_int32_t modes[50];
+	int maxw, maxh;
+
+	res_startup_big = 0;
+	if (res_too_big(Game_screen_mode, modes, gr_list_modes(modes), &maxw, &maxh))
+	{
+		res_startup_big = Game_screen_mode;
+		Game_screen_mode = SM(960, 540);
 	}
 }
 
+void res_startup_ask(void) // once menus can show
+{
+	if (!res_startup_big)
+		return;
+	if (nm_messagebox(NULL, 2, "Yes", "Default", "Your last game reported a larger than\nmonitor resolution selected.\n\nContinue with %ix%i?",
+		SM_W(res_startup_big), SM_H(res_startup_big)) == 0)
+	{
+		gr_set_mode(res_startup_big);
+		Game_screen_mode = res_startup_big;
+		set_screen_mode(SCREEN_MENU);
+	}
+	else // Default (or Esc): stay at 960x540, 16:9
+	{
+		GameCfg.AspectY = 16;
+		GameCfg.AspectX = 9;
+	}
+	res_startup_big = 0;
+}
+
+// "Keep this resolution?" countdown: Revert is highlighted, Keep must be picked on purpose,
+// and Esc or running out of time reverts
+#define RES_KEEP_SECONDS 15
+static fix64 res_keep_start;
+static int res_keep_expired;
+static char res_keep_text[40];
+
+static int res_keep_handler(newmenu *menu, d_event *event, void *userdata)
+{
+	userdata = userdata;
+	if (event->type == EVENT_IDLE)
+	{
+		int left = RES_KEEP_SECONDS - (int)((timer_query() - res_keep_start) / F1_0);
+		if (left <= 0)
+		{
+			res_keep_expired = 1;
+			window_close(newmenu_get_window(menu));
+			return 1;
+		}
+		snprintf(res_keep_text, sizeof(res_keep_text), "Reverting in %i seconds", left);
+	}
+	return 0;
+}
+
+static int res_keep_countdown(void)
+{
+	newmenu_item m[3];
+	int choice;
+
+	res_keep_start = timer_query();
+	res_keep_expired = 0;
+	snprintf(res_keep_text, sizeof(res_keep_text), "Reverting in %i seconds", RES_KEEP_SECONDS);
+	m[0].type = NM_TYPE_TEXT; m[0].text = res_keep_text;
+	m[1].type = NM_TYPE_MENU; m[1].text = "Revert";
+	m[2].type = NM_TYPE_MENU; m[2].text = "Keep";
+	choice = newmenu_do1(NULL, "Keep this resolution?", 3, m, res_keep_handler, NULL, 1);
+	return !res_keep_expired && choice == 2;
+}
+
+// Applies a mode. One bigger than the monitor needs "Are you sure?" first (No or Esc cancels), then
+// Keep within the countdown, else it switches back. Returns 1 if the new mode is in use.
+static int res_apply_checked(u_int32_t new_mode, int fullscr, int borderless, const u_int32_t *modes, int n)
+{
+	u_int32_t old_mode = Game_screen_mode;
+	int maxw, maxh, i;
+
+	if (fullscr && !borderless) // fullscreen exclusive: only the modes the monitor lists
+	{
+		for (i = 0; i < n && modes[i] != new_mode; i++)
+			;
+		if (n > 0 && i == n)
+		{
+			nm_messagebox("Screen Resolution", 1, "OK", "Fullscreen only runs at resolutions\nyour monitor lists.\n\nTick Borderless window, or untick\nFullscreen, for other sizes.");
+			return 0;
+		}
+		res_apply(new_mode, fullscr, borderless);
+		return 1;
+	}
+	if (fullscr) // fullscreen borderless: no bigger than the monitor it runs on
+	{
+		if (gr_monitor_size(&maxw, &maxh) && (SM_W(new_mode) > maxw || SM_H(new_mode) > maxh))
+		{
+			nm_messagebox("Screen Resolution", 1, "OK", "Fullscreen Borderless can't be bigger\nthan the monitor it runs on (%ix%i).", maxw, maxh);
+			return 0;
+		}
+		res_apply(new_mode, fullscr, borderless);
+		return 1;
+	}
+	if (!res_too_big(new_mode, modes, n, &maxw, &maxh)) // windowed: anything, far bigger than the monitor asks first
+	{
+		res_apply(new_mode, fullscr, borderless);
+		return 1;
+	}
+	if (nm_messagebox("Screen Resolution", 2, "Yes", "No", "%ix%i is larger than\nyour monitor (%ix%i).\n\nAre you sure?",
+		SM_W(new_mode), SM_H(new_mode), maxw, maxh) != 0)
+		return 0;
+	res_apply(new_mode, fullscr, borderless);
+	if (res_keep_countdown())
+		return 1;
+	res_apply(old_mode, fullscr, borderless);
+	return 0;
+}
+
+// Sets the render aspect for a mode: the filter's shape while the box is ticked, else the mode's own
+static void res_set_aspect(u_int32_t casp)
+{
+	if (GameCfg.ResCustom && GameCfg.ResFilterW && res_in_filter(casp)) // a size you typed with your own height keeps its own shape
+		casp = SM(GameCfg.ResFilterW, GameCfg.ResFilterH);
+	GameCfg.AspectY = SM_W(casp)/gcd(SM_W(casp),SM_H(casp));
+	GameCfg.AspectX = SM_H(casp)/gcd(SM_W(casp),SM_H(casp));
+}
+
+// Applies Fullscreen / Borderless, moving to a size the new mode allows if needed
+static void res_apply_window_mode(int fullscr, int borderless, u_int32_t *modes, int num_presets)
+{
+	u_int32_t new_mode;
+	int i;
+
+	new_mode = Game_screen_mode;
+	if (fullscr && !borderless && num_presets > 0) // fullscreen exclusive: a listed mode, else the monitor's largest
+	{
+		for (i = 0; i < num_presets && modes[i] != new_mode; i++)
+			;
+		if (i == num_presets)
+			for (new_mode = modes[0], i = 1; i < num_presets; i++)
+				if (SM_W(modes[i]) * SM_H(modes[i]) > SM_W(new_mode) * SM_H(new_mode))
+					new_mode = modes[i];
+	}
+	else if (fullscr) // fullscreen borderless: no bigger than the monitor
+	{
+		int monw, monh;
+		if (gr_monitor_size(&monw, &monh) && (SM_W(new_mode) > monw || SM_H(new_mode) > monh))
+			new_mode = SM(monw, monh);
+	}
+	if (new_mode != Game_screen_mode)
+	{
+		GameCfg.AspectY = SM_W(new_mode)/gcd(SM_W(new_mode),SM_H(new_mode));
+		GameCfg.AspectX = SM_H(new_mode)/gcd(SM_W(new_mode),SM_H(new_mode));
+	}
+	res_apply(new_mode, fullscr, borderless);
+}
+
+void change_res()
+{
+	u_int32_t modes[50], list[60], new_mode;
+	int i, k, mc, num_presets, nlist, citem, opt_fullscr, opt_borderless, fullscr, borderless, ax, ay;
+	newmenu_item m[60+10];
+	char restext[60][12], crestext[12], casptext[12];
+
+	num_presets = gr_list_modes( modes );
+	res_all_modes = modes;
+	res_all_n = num_presets;
+	fullscr = gr_check_fullscreen();
+	borderless = GameCfg.BorderlessWindow;
+	res_focus = 0;
+	snprintf(crestext, sizeof(crestext), "%ix%i", SM_W(Game_screen_mode), SM_H(Game_screen_mode));
+
+	// The menu stays open: Enter ticks, rebuilds or applies, and the menu is built again each time.
+	// Esc leaves it.
+	for (;;)
+	{
+		// The list: the modes of the filter's shape (or every mode), then the saved custom resolutions
+		nlist = 0;
+		for (i = 0; i < num_presets; i++)
+			if (res_in_filter(modes[i]))
+				list[nlist++] = modes[i];
+		for (k = 0; k < RES_NUM_SMALL_WIDE; k++) // common sizes the monitor does not list, for windowed play
+		{
+			for (i = 0; i < nlist && list[i] != res_small_wide[k]; i++)
+				;
+			if (i == nlist && res_in_filter(res_small_wide[k]))
+				list[nlist++] = res_small_wide[k];
+		}
+		if (GameCfg.ResCustom)
+			for (k = 0; k < 2; k++)
+			{
+				for (i = 0; i < nlist && list[i] != GameCfg.ResExtra[k]; i++)
+					;
+				if (GameCfg.ResExtra[k] && i == nlist)
+					list[nlist++] = GameCfg.ResExtra[k];
+			}
+		for (i = 1; i < nlist; i++) // in order, biggest first like the monitor's own list: by width, then height
+		{
+			u_int32_t v = list[i];
+			for (k = i; k > 0 && list[k - 1] < v; k--)
+				list[k] = list[k - 1];
+			list[k] = v;
+		}
+
+		mc = 0;
+		citem = -1;
+		for (i = 0; i < nlist; i++)
+		{
+			snprintf(restext[mc], sizeof(restext[mc]), "%ix%i", SM_W(list[i]), SM_H(list[i]));
+			m[mc].type = NM_TYPE_RADIO;
+			m[mc].text = restext[mc];
+			m[mc].value = (citem == -1 && Game_screen_mode == list[i]);
+			m[mc].group = 0;
+			if (m[mc].value)
+				citem = mc;
+			mc++;
+		}
+		res_num_list = nlist;
+		res_steps = list;
+		res_steps_n = nlist;
+
+		m[mc].type = NM_TYPE_TEXT; m[mc].text = ""; mc++; // little space for overview
+		// the custom checkbox and its resolution and aspect fields
+		res_opt_custom = mc;
+		m[mc].type = NM_TYPE_CHECK; m[mc].text = "use custom values"; m[mc].value = GameCfg.ResCustom; mc++;
+		m[mc].type = NM_TYPE_TEXT; m[mc].text = "resolution:"; mc++;
+		res_opt_res = mc;
+		m[mc].type = NM_TYPE_INPUT; m[mc].text = crestext; m[mc].text_len = 11; mc++;
+		m[mc].type = NM_TYPE_TEXT; m[mc].text = "aspect:"; mc++;
+		res_opt_aspect = mc;
+		if (GameCfg.ResCustom && GameCfg.ResFilterW)
+			snprintf(casptext, sizeof(casptext), "%ix%i", GameCfg.ResFilterW, GameCfg.ResFilterH); // the live filter
+		else if (GameCfg.ResCustom)
+			snprintf(casptext, sizeof(casptext), "0x0"); // every shape: the aspect follows the typed resolution
+		else
+			snprintf(casptext, sizeof(casptext), "%ix%i", GameCfg.AspectY, GameCfg.AspectX); // placeholder: the current aspect
+		res_aspect_auto = (GameCfg.ResCustom && !GameCfg.ResFilterW);
+		m[mc].type = NM_TYPE_INPUT; m[mc].text = casptext; m[mc].text_len = 11; mc++;
+		m[mc].type = NM_TYPE_TEXT; m[mc].text = ""; mc++; // little space for overview
+		// fullscreen
+		opt_fullscr = res_opt_fullscr = mc;
+		m[mc].type = NM_TYPE_CHECK; m[mc].text = "Fullscreen"; m[mc].value = fullscr; mc++;
+
+		opt_borderless = res_opt_borderless = mc;
+		m[mc].type = NM_TYPE_CHECK; m[mc].text = "Borderless window"; m[mc].value = borderless; mc++;
+
+		Assert(mc <= SDL_arraysize(m));
+
+		// create the menu
+		res_rebuild = res_apply_custom = res_apply_window = 0;
+		res_enter_item = -1;
+		newmenu_do1(NULL, "Screen Resolution", mc, m, change_res_handler, NULL,
+			(res_focus >= 1000) ? nlist + res_focus - 1000 : min(res_focus, max(nlist - 1, 0)));
+
+		fullscr = m[opt_fullscr].value;
+		borderless = m[opt_borderless].value;
+
+		if (res_rebuild == RES_REBUILD_ASPECT) // Enter on the aspect field ticks the box; the typed shape becomes the filter
+		{
+			int w, h;
+			GameCfg.ResCustom = 1;
+			if (res_parse_pair(casptext, &w, &h))
+			{
+				GameCfg.ResFilterW = w / gcd(w, h);
+				GameCfg.ResFilterH = h / gcd(w, h);
+			}
+			else if (strtol(casptext, NULL, 10) == 0) // 0x0: every shape again
+				GameCfg.ResFilterW = GameCfg.ResFilterH = 0;
+			continue;
+		}
+		if (res_rebuild == RES_REBUILD_TOGGLE)
+		{
+			GameCfg.ResCustom = m[res_opt_custom].value;
+			if (!GameCfg.ResCustom) // unticked: no filter, no custom entries, default menu
+			{
+				GameCfg.ResFilterW = GameCfg.ResFilterH = 0;
+				GameCfg.ResExtra[0] = GameCfg.ResExtra[1] = 0;
+			}
+			continue;
+		}
+		if (res_apply_custom) // Enter on a typed resolution with the box ticked
+		{
+			int w, h;
+			if (!res_parse_pair(crestext, &w, &h))
+				continue;
+			if (w < 320 || h < 200) // oh oh - the resolution is too small. Revert!
+			{
+				nm_messagebox( TXT_WARNING, 1, "OK", "Entered resolution is too small.\nReverting ..." );
+				snprintf(crestext, sizeof(crestext), "%ix%i", SM_W(Game_screen_mode), SM_H(Game_screen_mode));
+				continue;
+			}
+			new_mode = SM(w, h);
+			ax = GameCfg.AspectX;
+			ay = GameCfg.AspectY;
+			if (GameCfg.ResFilterW || !res_parse_pair(casptext, &w, &h)) // the filter's shape, or the mode's own
+				res_set_aspect(new_mode);
+			else // we even have a custom aspect set up
+			{
+				GameCfg.AspectY = w / gcd(w, h);
+				GameCfg.AspectX = h / gcd(w, h);
+			}
+			if (!res_apply_checked(new_mode, fullscr, borderless, modes, num_presets))
+			{
+				GameCfg.AspectX = ax; // cancelled or reverted
+				GameCfg.AspectY = ay;
+				continue;
+			}
+			if (new_mode != GameCfg.ResExtra[0]) // keep it in the list, newest first, at most 2
+			{
+				GameCfg.ResExtra[1] = GameCfg.ResExtra[0];
+				GameCfg.ResExtra[0] = new_mode;
+			}
+			continue;
+		}
+		if (res_enter_item >= 0) // Enter on the ticked, highlighted resolution
+		{
+			new_mode = list[res_enter_item];
+			ax = GameCfg.AspectX;
+			ay = GameCfg.AspectY;
+			GameCfg.AspectY = SM_W(new_mode)/gcd(SM_W(new_mode),SM_H(new_mode)); // a listed mode keeps its true shape
+			GameCfg.AspectX = SM_H(new_mode)/gcd(SM_W(new_mode),SM_H(new_mode));
+			if (!res_apply_checked(new_mode, fullscr, borderless, modes, num_presets))
+			{
+				GameCfg.AspectX = ax; // cancelled or reverted
+				GameCfg.AspectY = ay;
+			}
+			snprintf(crestext, sizeof(crestext), "%ix%i", SM_W(Game_screen_mode), SM_H(Game_screen_mode));
+			continue;
+		}
+		if (res_apply_window) // Enter on Fullscreen or Borderless: apply it and stay in the menu
+		{
+			res_apply_window_mode(fullscr, borderless, modes, num_presets);
+			fullscr = gr_check_fullscreen();
+			borderless = GameCfg.BorderlessWindow;
+			snprintf(crestext, sizeof(crestext), "%ix%i", SM_W(Game_screen_mode), SM_H(Game_screen_mode));
+			continue;
+		}
+		break; // Esc: leave, keeping the resolution
+	}
+
+	// Leaving: apply Fullscreen / Borderless changes
+	res_apply_window_mode(fullscr, borderless, modes, num_presets);
+	res_steps = NULL; // the lists live on this function's stack
+	res_all_modes = NULL;
+	res_all_n = 0;
+}
+
+//	Sensitivity & Deadzone menu.
+//
+//	Built conditionally from the currently enabled control devices, so the
+//	player only sees sliders they can actually use. Order, top to bottom, is
+//	always: Mouse (if enabled), then Keyboard (always, it is the fallback
+//	scheme), then Joystick (if enabled).
 void input_config_sensitivity()
 {
 	newmenu_item m[64];
-	int i = 0, nitems = 0, keysens = 0, joysens = -1, joydead = -1, joyunder = -1, mousesens = -1, mouseoverrun = -1;
-	int mousefsdead = -1, mouseimpulse = -1, joyturnlimitx = -1, joyturnlimity = -1, mouseturnlimitx = -1, mouseturnlimity = -1;
-	int joysection = -1, mousesection = -1;
-	const int use_joy = PlayerCfg.ControlType & CONTROL_USING_JOYSTICK;
-	const int use_mouse = PlayerCfg.ControlType & CONTROL_USING_MOUSE;
+	int i, nitems = 0;
+	int keysens = -1, joysens = -1, joydead = -1, joyunder = -1;
+	int mousesens = -1, mouseoverrun = -1, mousefsdead = -1;
+	int use_mouse, use_joy, old_school;
+	int mouseimpulse = -1; /* Old school mouse */ 
+	int mouseturnlimitx = -1, mouseturnlimity = -1, joyturnlimitx = -1, joyturnlimity = -1;
 
+	use_mouse = (PlayerCfg.ControlType & CONTROL_USING_MOUSE) ? 1 : 0;
+	use_joy   = (PlayerCfg.ControlType & CONTROL_USING_JOYSTICK) ? 1 : 0;
+
+	// Old school is one of the three radio styles, and the only one that uses a
+	// single Base Sensitivity slider instead of the per-axis set.
+	old_school = (PlayerCfg.MouseControlStyle == MOUSE_CONTROL_OLDSCHOOL) ? 1 : 0;
+
+	// The Oversteer Buffer is hidden from the UI; everything underneath defaults
+	// to zero so it cannot affect the mouse response.
+	for (i = 0; i < 6; i++)
+		PlayerCfg.MouseOverrun[i] = 0;
+
+	// ---- Mouse block: first, and only when the mouse is enabled ----
+	if (use_mouse)
+	{
+		m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Mouse Sensitivity:"; nitems++;
+
+		if (old_school)
+		{
+			mouseimpulse = nitems;
+			m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "Base Sensitivity:"; m[nitems].value = PlayerCfg.MouseImpulse; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
+		}
+		else
+		{
+			mousesens = nitems;
+			m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_TURN_LR; m[nitems].value = PlayerCfg.MouseSens[0]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
+			m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_PITCH_UD; m[nitems].value = PlayerCfg.MouseSens[1]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
+			m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_SLIDE_LR; m[nitems].value = PlayerCfg.MouseSens[2]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
+			m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_SLIDE_UD; m[nitems].value = PlayerCfg.MouseSens[3]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
+			m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_BANK_LR; m[nitems].value = PlayerCfg.MouseSens[4]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
+
+
+			if (PlayerCfg.MouseControlStyle == MOUSE_CONTROL_FLIGHT_SIM)
+			{
+				m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
+				m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Mouse FlightSim Deadzone:"; nitems++;
+				mousefsdead = nitems;
+				m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "X/Y"; m[nitems].value = PlayerCfg.MouseFSDead; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
+			}
+
+			if (PlayerCfg.MouseControlStyle == MOUSE_CONTROL_ENHANCED)
+			{
+				m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
+				m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Enhanced Turn Limits:"; nitems++;
+				m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "0=Classic, 15=400%, 16=Uncapped"; nitems++;
+				mouseturnlimitx = nitems; m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "X Axis"; m[nitems].value = PlayerCfg.MouseTurnLimit[0]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
+				mouseturnlimity = nitems; m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "Y Axis"; m[nitems].value = PlayerCfg.MouseTurnLimit[1]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
+			}
+		}
+
+		m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
+	}
+
+	// ---- Keyboard block: always present ----
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Keyboard Sensitivity:"; nitems++;
 	keysens = nitems;
 	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_TURN_LR; m[nitems].value = PlayerCfg.KeyboardSens[0]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
@@ -1020,8 +1782,9 @@ void input_config_sensitivity()
 	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_SLIDE_UD; m[nitems].value = PlayerCfg.KeyboardSens[3]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
 	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_BANK_LR; m[nitems].value = PlayerCfg.KeyboardSens[4]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
-	if (use_joy) {
-	joysection = nitems;
+	// ---- Joystick block: last, and only when a joystick is enabled ----
+	if (use_joy)
+	{
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Joystick Sensitivity:"; nitems++;
 	joysens = nitems;
 	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_TURN_LR; m[nitems].value = PlayerCfg.JoystickSens[0]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
@@ -1052,94 +1815,48 @@ void input_config_sensitivity()
 	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_SLIDE_UD; m[nitems].value = PlayerCfg.JoystickUndercalibrate[3]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
 	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_BANK_LR; m[nitems].value = PlayerCfg.JoystickUndercalibrate[4]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
 	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_THROTTLE; m[nitems].value = PlayerCfg.JoystickUndercalibrate[5]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;	
-	}
-	if (use_mouse) {
-	mousesection = nitems;
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Mouse Sensitivity:"; nitems++;
-	mousesens = nitems;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_TURN_LR; m[nitems].value = PlayerCfg.MouseSens[0]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_PITCH_UD; m[nitems].value = PlayerCfg.MouseSens[1]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_SLIDE_LR; m[nitems].value = PlayerCfg.MouseSens[2]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_SLIDE_UD; m[nitems].value = PlayerCfg.MouseSens[3]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_BANK_LR; m[nitems].value = PlayerCfg.MouseSens[4]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_THROTTLE; m[nitems].value = PlayerCfg.MouseSens[5]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-    m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;    
-	if (PlayerCfg.MouseControlStyle == MOUSE_CONTROL_ENHANCED) {
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Enhanced Turn Limits:"; nitems++;
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "0=Classic, 15=400%, 16=Uncapped"; nitems++;
-	mouseturnlimitx = nitems; m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "X Axis"; m[nitems].value = PlayerCfg.MouseTurnLimit[0]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-	mouseturnlimity = nitems; m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "Y Axis"; m[nitems].value = PlayerCfg.MouseTurnLimit[1]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
-	}
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Mouse Smoothing:"; nitems++;
-    mouseoverrun = nitems;
-    m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_TURN_LR; m[nitems].value = PlayerCfg.MouseOverrun[0]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-    m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_PITCH_UD; m[nitems].value = PlayerCfg.MouseOverrun[1]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-    m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_SLIDE_LR; m[nitems].value = PlayerCfg.MouseOverrun[2]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-    m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_SLIDE_UD; m[nitems].value = PlayerCfg.MouseOverrun[3]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-    m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_BANK_LR; m[nitems].value = PlayerCfg.MouseOverrun[4]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-    m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = TXT_THROTTLE; m[nitems].value = PlayerCfg.MouseOverrun[5]; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
-	if (PlayerCfg.MouseControlStyle == MOUSE_CONTROL_OLDSCHOOL) {
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Old School Mouse:"; nitems++;
-	mouseimpulse = nitems; 
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "Base Sensitivity:"; m[nitems].value = PlayerCfg.MouseImpulse; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
-	}
-	if (PlayerCfg.MouseControlStyle == MOUSE_CONTROL_FLIGHT_SIM) {
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Mouse FlightSim Deadzone:"; nitems++;
-	mousefsdead = nitems;
-	m[nitems].type = NM_TYPE_SLIDER; m[nitems].text = "X/Y"; m[nitems].value = PlayerCfg.MouseFSDead; m[nitems].min_value = 0; m[nitems].max_value = 16; nitems++;
-	}
-	}
-
-	/* Keep mouse settings first when both input devices are enabled. */
-	if (use_mouse && use_joy) {
-		newmenu_item joyitems[40];
-		const int joycount = mousesection - joysection;
-		const int mousecount = nitems - mousesection;
-		for (i = 0; i < joycount; i++) joyitems[i] = m[joysection + i];
-		for (i = 0; i < mousecount; i++) m[joysection + i] = m[mousesection + i];
-		for (i = 0; i < joycount; i++) m[joysection + mousecount + i] = joyitems[i];
-		mousesens -= joycount; mouseoverrun -= joycount;
-		if (mousefsdead >= 0) mousefsdead -= joycount;
-		if (mouseimpulse >= 0) mouseimpulse -= joycount;
-		if (mouseturnlimitx >= 0) mouseturnlimitx -= joycount;
-		if (mouseturnlimity >= 0) mouseturnlimity -= joycount;
-		joysens += mousecount; joydead += mousecount; joyunder += mousecount;
-		joyturnlimitx += mousecount; joyturnlimity += mousecount;
-	}
+	} // end joystick block
 
 	newmenu_do1(NULL, "SENSITIVITY / ADVANCED TURNING", nitems, m, NULL, NULL, 1);
 
-	for (i = 0; i <= 5; i++)
-	{
-		if (i < 5)
-			PlayerCfg.KeyboardSens[i] = m[keysens+i].value;
-		if (use_joy) {
-			PlayerCfg.JoystickSens[i] = m[joysens+i].value;
-			PlayerCfg.JoystickDead[i] = m[joydead+i].value;
-			PlayerCfg.JoystickUndercalibrate[i] = m[joyunder+i].value;
-		}
-		if (use_mouse) {
-			PlayerCfg.MouseSens[i] = m[mousesens+i].value;
-			PlayerCfg.MouseOverrun[i] = m[mouseoverrun+i].value;
-		}
-	}
-	if (use_mouse) {
-		if (mousefsdead >= 0) PlayerCfg.MouseFSDead = m[mousefsdead].value;
-		if (mouseimpulse >= 0) PlayerCfg.MouseImpulse = m[mouseimpulse].value;
-		if (mouseturnlimitx >= 0) PlayerCfg.MouseTurnLimit[0] = m[mouseturnlimitx].value;
-		if (mouseturnlimity >= 0) PlayerCfg.MouseTurnLimit[1] = m[mouseturnlimity].value;
-	}
-	if (use_joy) {
+	// Read back only the groups that were actually built. Every index starts at
+	// -1, so an absent group is skipped rather than indexed out of bounds.
+	for (i = 0; i < 5; i++)
+		PlayerCfg.KeyboardSens[i] = m[keysens + i].value;
+
+	if (mousesens >= 0)
+		for (i = 0; i < 5; i++)
+			PlayerCfg.MouseSens[i] = m[mousesens + i].value;
+
+	if (mouseoverrun >= 0)
+		for (i = 0; i < 6; i++)
+			PlayerCfg.MouseOverrun[i] = m[mouseoverrun + i].value;
+
+	if (mouseimpulse >= 0)
+		PlayerCfg.MouseImpulse = m[mouseimpulse].value;
+
+	if (mousefsdead >= 0)
+		PlayerCfg.MouseFSDead = m[mousefsdead].value;
+
+	if (mouseturnlimitx >= 0)
+		PlayerCfg.MouseTurnLimit[0] = m[mouseturnlimitx].value;
+	if (mouseturnlimity >= 0)
+		PlayerCfg.MouseTurnLimit[1] = m[mouseturnlimity].value;
+	if (joyturnlimitx >= 0)
 		PlayerCfg.JoystickTurnLimit[0] = m[joyturnlimitx].value;
+	if (joyturnlimity >= 0)
 		PlayerCfg.JoystickTurnLimit[1] = m[joyturnlimity].value;
-	}
+
+	if (joysens >= 0)
+		for (i = 0; i < 6; i++)
+		{
+			PlayerCfg.JoystickSens[i] = m[joysens + i].value;
+			PlayerCfg.JoystickDead[i] = m[joydead + i].value;
+			PlayerCfg.JoystickUndercalibrate[i] = m[joyunder + i].value;
+		}
 }
 
-static int opt_ic_usejoy = 0, opt_ic_usemouse = 0, opt_ic_confkey = 0, opt_ic_confjoy = 0, opt_ic_confmouse = 0, opt_ic_confweap = 0, opt_ic_mouseflightsim = 0, opt_ic_joymousesens = 0, opt_ic_grabinput = 0, opt_ic_mousefsgauge = 0, opt_ic_stickyrear = 0, opt_ic_help0 = 0, opt_ic_help1 = 0, opt_ic_help2 = 0;
+static int opt_ic_usejoy = 0, opt_ic_usemouse = 0, opt_ic_confkey = 0, opt_ic_confjoy = 0, opt_ic_confmouse = 0, opt_ic_confweap = 0, opt_ic_confobs = 0, opt_ic_mouseflightsim = 0, opt_ic_joymousesens = 0, opt_ic_grabinput = 0, opt_ic_mousefsgauge = 0, opt_ic_stickyrear = 0, opt_ic_lastinput = 0, opt_ic_help0 = 0, opt_ic_help1 = 0, opt_ic_help2 = 0;
 int input_config_menuset(newmenu *menu, d_event *event, void *userdata)
 {
 	newmenu_item *items = newmenu_get_items(menu);
@@ -1168,7 +1885,9 @@ int input_config_menuset(newmenu *menu, d_event *event, void *userdata)
 			if (citem == opt_ic_mousefsgauge)
 				PlayerCfg.MouseFSIndicator = items[citem].value;
 			if (citem == opt_ic_stickyrear)			
-				PlayerCfg.StickyRearview = items[citem].value;		
+				PlayerCfg.StickyRearview = items[citem].value;
+			if (citem == opt_ic_lastinput)
+				PlayerCfg.LastInputWins = items[citem].value;
 			break;
 
 		case EVENT_NEWMENU_SELECTED:
@@ -1180,6 +1899,8 @@ int input_config_menuset(newmenu *menu, d_event *event, void *userdata)
 				kconfig(2, "MOUSE");
 			if (citem == opt_ic_confweap)
 				kconfig(3, "WEAPON KEYS");
+			if (citem == opt_ic_confobs)
+				kconfig(4, "OBSERVER CONTROLS");
 			if (citem == opt_ic_joymousesens)
 				input_config_sensitivity();
 			if (citem == opt_ic_help0)
@@ -1216,6 +1937,8 @@ void input_config()
 	m[nitems].type = NM_TYPE_MENU; m[nitems].text = "CUSTOMIZE MOUSE"; nitems++;
 	opt_ic_confweap = nitems;
 	m[nitems].type = NM_TYPE_MENU; m[nitems].text = "CUSTOMIZE WEAPON KEYS"; nitems++;
+	opt_ic_confobs = nitems;
+	m[nitems].type = NM_TYPE_MENU; m[nitems].text = "CUSTOMIZE OBSERVER CONTROLS"; nitems++;
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "MOUSE CONTROL TYPE:"; nitems++;
 	opt_ic_mouseflightsim = nitems;
@@ -1233,6 +1956,8 @@ void input_config()
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text= "Mouse FlightSim Indicator"; m[nitems].value = PlayerCfg.MouseFSIndicator; nitems++;
 	opt_ic_stickyrear = nitems;
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text= "Sticky Rearview"; m[nitems].value = PlayerCfg.StickyRearview; nitems++;
+	opt_ic_lastinput = nitems;
+	m[nitems].type = NM_TYPE_CHECK; m[nitems].text= "Last Input Wins (Slide/Bank)"; m[nitems].value = PlayerCfg.LastInputWins; nitems++;
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
 	opt_ic_help0 = nitems;
 	m[nitems].type = NM_TYPE_MENU; m[nitems].text = "GAME SYSTEM KEYS"; nitems++;
@@ -1300,7 +2025,10 @@ void reticle_config()
 	PlayerCfg.ReticleSize = m[opt_ret_size].value;
 }
 
+int opt_gr_briefingrobots3d;
 int opt_gr_texfilt, opt_gr_movietexfilt, opt_gr_brightness, opt_gr_reticlemenu, opt_gr_alphafx, opt_gr_dynlightcolor, opt_gr_vsync, opt_gr_multisample, opt_gr_fpsindi, opt_gr_disablecockpit;
+int opt_gr_classicdepth;
+int opt_gr_custommodels, opt_gr_customtextures, opt_gr_reducedflash;
 #ifdef RT_DX12
 
 int RT_GetIntFromConfig(RT_Config* config, RT_String key) 
@@ -1696,14 +2424,22 @@ int graphics_config_menuset(newmenu *menu, d_event *event, void *userdata)
 void graphics_config()
 {
 #ifdef OGL
-	newmenu_item m[18];
+	// +1 headroom for the conditional VSync item (see gr_vsync_supported); the menu already uses 20 items without it.
+	newmenu_item m[23]; // +1 for 3D Briefing Robots
 	int i = 0;
 #elif RT_DX12
 	newmenu_item m[12];
 #else
-	newmenu_item m[6];
+	// +1 headroom for the conditional VSync item (see gr_vsync_supported).
+	newmenu_item m[7];
 #endif
 	int nitems = 0;
+
+	// Storage for the framerate label and its value. Both must live for as long
+	// as the menu does, because the menu keeps POINTERS to them and dereferences
+	// those later, inside newmenu_do1().
+	char framerate_label[32];
+	char framerate_string[8];
 
 #ifdef OGL
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Texture Filtering:"; nitems++;
@@ -1714,6 +2450,8 @@ void graphics_config()
 	m[nitems].type = NM_TYPE_RADIO; m[nitems].text = "Anisotropic"; m[nitems].value = 0; m[nitems].group = 0; nitems++;
 	opt_gr_movietexfilt = nitems;
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Movie Filter"; m[nitems].value = GameCfg.MovieTexFilt; nitems++;
+	opt_gr_briefingrobots3d = nitems;
+	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "3D Briefing Robots"; m[nitems].value = GameCfg.BriefingRobots3D; nitems++;
 	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = ""; nitems++;
 #endif
 	opt_gr_brightness = nitems;
@@ -1735,10 +2473,37 @@ void graphics_config()
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Transparency Effects"; m[nitems].value = PlayerCfg.AlphaEffects; nitems++;
 	opt_gr_dynlightcolor = nitems;
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Colored Dynamic Light"; m[nitems].value = PlayerCfg.DynLightColor; nitems++;
-	opt_gr_vsync = nitems;
-	m[nitems].type = NM_TYPE_CHECK; m[nitems].text="VSync"; m[nitems].value = GameCfg.VSync; nitems++;
+// VSync option is shown ONLY when the video backend can genuinely control vsync
+// (see gr_vsync_supported()). On the current SDL 1.2 backend it stays hidden,
+// because that API layer has no way to enable, disable or even query vsync --
+// the setting used to appear unconditionally and silently overrode the Framerate
+// value instead, which is exactly the misleading control this check prevents.
+//
+// A future SDL2 backend returns non-zero and the option appears automatically,
+// wired to a real swap interval.
+	if (gr_vsync_supported())
+	{
+		opt_gr_vsync = nitems;
+		m[nitems].type = NM_TYPE_CHECK;
+		m[nitems].text="VSync";
+		m[nitems].value = GameCfg.VSync;
+		nitems++;
+	}
+	else
+	{
+		// Sentinel, so the read-back below can never index the wrong entry.
+		opt_gr_vsync = -1;
+	}
 	opt_gr_multisample = nitems;
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text="4x multisampling"; m[nitems].value = GameCfg.Multisample; nitems++;
+	opt_gr_classicdepth = nitems;
+	m[nitems].type = NM_TYPE_CHECK; m[nitems].text="Classic Depth Ordering (SP)"; m[nitems].value = GameCfg.ClassicDepth; nitems++;
+	opt_gr_custommodels = nitems;
+	m[nitems].type = NM_TYPE_CHECK; m[nitems].text="3D Models"; m[nitems].value = GameCfg.UseCustomModels; nitems++;
+	opt_gr_customtextures = nitems;
+	m[nitems].type = NM_TYPE_CHECK; m[nitems].text="Custom Textures"; m[nitems].value = GameCfg.UseCustomTextures; nitems++;
+	opt_gr_reducedflash = nitems;
+	m[nitems].type = NM_TYPE_CHECK; m[nitems].text="Reduced Flash"; m[nitems].value = GameCfg.ReducedFlash; nitems++;
 #endif
 	opt_gr_fpsindi = nitems;
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text="FPS Counter"; m[nitems].value = GameCfg.FPSIndicator; nitems++;
@@ -1750,46 +2515,154 @@ void graphics_config()
 #endif
 
 
-	m[nitems].type = NM_TYPE_TEXT; m[nitems].text = "Framerate"; nitems++; 
+	// Label states the accepted range so the user does not have to guess. Built
+	// from the same constants the clamps below use (MIN_FRAMERATE_CAP and
+	// MAXIMUM_FPS), so the text can never drift out of step with the values that
+	// are actually accepted.
+	snprintf(framerate_label, sizeof(framerate_label) - 1, "Framerate (%d-%d)",
+		MIN_FRAMERATE_CAP, MAXIMUM_FPS);
 
-	char framerate_string[5];
-	snprintf(framerate_string,sizeof(char)*4,"%d",PlayerCfg.maxFps);
-	m[nitems].type = NM_TYPE_INPUT; m[nitems].text=framerate_string; m[nitems].text_len=5;  nitems++;
+	m[nitems].type = NM_TYPE_TEXT;
+	m[nitems].text = framerate_label;
+	nitems++;
 
+	snprintf(framerate_string,sizeof(framerate_string)-1,"%d",PlayerCfg.maxFps);
+	m[nitems].type = NM_TYPE_INPUT; m[nitems].text=framerate_string; m[nitems].text_len=sizeof(framerate_string)-1;  nitems++;
 
 	newmenu_do1( NULL, "Graphics Options", nitems, m, graphics_config_menuset, NULL, 1 );
 
-#ifdef OGL
-	if (GameCfg.VSync != m[opt_gr_vsync].value || GameCfg.Multisample != m[opt_gr_multisample].value)
-		nm_messagebox( NULL, 1, TXT_OK, "Setting VSync or 4x Multisample\nrequires restart on some systems.");
+	// Snapshot the settings that can invalidate the cached GL textures, so the
+	// rebuild below only runs when one of them actually changed.
+	int old_texfilt = GameCfg.TexFilt;
+	int old_multisample = GameCfg.Multisample;
+	int old_custommodels = GameCfg.UseCustomModels;
 
+	int old_customtextures = GameCfg.UseCustomTextures;
+
+#ifdef OGL
 	for (i = 0; i <= 3; i++)
 		if (m[i+opt_gr_texfilt].value)
 			GameCfg.TexFilt = i;
 	GameCfg.MovieTexFilt = m[opt_gr_movietexfilt].value;
+	GameCfg.BriefingRobots3D = m[opt_gr_briefingrobots3d].value;
 	PlayerCfg.AlphaEffects = m[opt_gr_alphafx].value;
 	PlayerCfg.DynLightColor = m[opt_gr_dynlightcolor].value;
-	GameCfg.VSync = m[opt_gr_vsync].value;
+	// The VSync item only exists when the backend supports vsync, so only read it
+	// back in that case. opt_gr_vsync is -1 otherwise (see graphics_config).
+	if (opt_gr_vsync >= 0)
+		GameCfg.VSync = m[opt_gr_vsync].value;
 	GameCfg.Multisample = m[opt_gr_multisample].value;
+	GameCfg.ClassicDepth = m[opt_gr_classicdepth].value;
+	if (GameCfg.UseCustomModels != m[opt_gr_custommodels].value)
+	{
+		GameCfg.UseCustomModels = m[opt_gr_custommodels].value;
+		if (GameCfg.UseCustomModels)
+			xmodel_load_all();
+		else
+			xmodel_free_all();
+	}
+	GameCfg.UseCustomTextures = m[opt_gr_customtextures].value;
+	// Purely local preference -- nothing to rebuild, and the effect sites read it
+	// through reduced_flash_wanted() every frame.
+	GameCfg.ReducedFlash = m[opt_gr_reducedflash].value;
 #endif
 	GameCfg.GammaLevel = m[opt_gr_brightness].value;
 	GameCfg.FPSIndicator = m[opt_gr_fpsindi].value;
-	PlayerCfg.DisableCockpit = m[opt_gr_disablecockpit].value; 
+	PlayerCfg.DisableCockpit = m[opt_gr_disablecockpit].value;
 #ifdef RT_DX12
 	PlayerCfg.ShieldEffects = m[opt_gr_shieldfx].value;
 #endif
 
+
 	PlayerCfg.maxFps=atoi(framerate_string);
 
-	if(PlayerCfg.maxFps < 25) {
-		PlayerCfg.maxFps = 25;
-	} else if (PlayerCfg.maxFps > 999) {
-		PlayerCfg.maxFps = 999; 
+	if(PlayerCfg.maxFps < MIN_FRAMERATE_CAP) {
+		PlayerCfg.maxFps = MIN_FRAMERATE_CAP;
+	} else if (PlayerCfg.maxFps > MAXIMUM_FPS) {
+		PlayerCfg.maxFps = MAXIMUM_FPS;
 	}
 
 #ifdef OGL
-	gr_set_attributes();
-	gr_set_mode(Game_screen_mode);
+	// Only rebuild the texture cache when something that affects it changed.
+	// Toggling Custom Textures is the slowest case (it re-reads the custom
+	// texture override tables), so tell the player what is happening rather
+	// than leaving the screen frozen with no feedback.
+	{
+		int texfilt_dirty     = (GameCfg.TexFilt != old_texfilt);
+		int multisample_dirty = (GameCfg.Multisample != old_multisample);
+		int models_dirty      = (GameCfg.UseCustomModels != old_custommodels);
+		int ctex_dirty        = (GameCfg.UseCustomTextures != old_customtextures);
+
+		if (texfilt_dirty || multisample_dirty || models_dirty || ctex_dirty)
+		{
+			// When ONLY custom textures changed, direction matters: the PNG path
+			// loads lazily per bitmap (see ogl_loadbmtexture_f, which early-exits
+			// when a valid GL handle is already resident).
+			//
+			// When ONLY 3D models changed, touch nothing but the models: the ASE
+			// parse/free already happened above via xmodel_load_all() /
+			// xmodel_free_all(), and each model's own textures GL-upload lazily
+			// on first draw. This keeps the models toggle from re-paging
+			// GameBitmaps, which belongs to Custom Textures only.
+			//
+			// Anything else (filtering, multisample) genuinely needs the
+			// full rebuild, because those settings are baked into every texture
+			// that is already resident.
+			int only_ctex = ctex_dirty && !texfilt_dirty && !multisample_dirty && !models_dirty;
+			int only_models = models_dirty && !texfilt_dirty && !multisample_dirty && !ctex_dirty;
+
+			if (only_ctex)
+			{
+				if (GameCfg.UseCustomTextures)
+				{
+					// Re-TICK (ON): stale plain-bitmap GL handles from the OFF
+					// state would make the loader early-exit ("already loaded")
+					// and never re-ask for the PNG -- including globals the
+					// level never touches (HUD, weapons, projectiles, explosions,
+					// powerups, robots). So invalidate ALL handles via
+					// gr_set_attributes() + gr_set_mode(), then walk EVERY
+					// bitmap so each one checks for its "<name>.png" override
+					// again (d2 has no per-level override tables to re-read).
+					// One-time hitch, correct.
+					show_boxed_message("Applying Texture Settings...", 0);
+
+					gr_set_attributes();
+					gr_set_mode(Game_screen_mode);
+
+					if (Game_wind)
+						ogl_cache_level_textures();
+				}
+				else
+				{
+					// UN-TICK (OFF): plain bitmaps are already resident, so just
+					// drop the PNG entries and let them fall back lazily. Fast.
+					show_boxed_message("Applying Texture Settings...", 0);
+
+					if (Game_wind)
+						ogl_recache_custom_textures();
+				}
+			}
+			else if (only_models)
+			{
+				// Models-only change: no bitmap or full-cache work. ASE data was
+				// already loaded/freed above; GL textures self-populate on next
+				// draw. Popup names the toggle so the player gets feedback for
+				// the (usually fast) op.
+				show_boxed_message("Applying Model Settings...", 0);
+			}
+			else
+			{
+				// Draw and FLIP the message before the blocking work starts, so it
+				// is actually visible during the pause instead of appearing after.
+				show_boxed_message("Applying Texture Settings...", 0);
+
+				gr_set_attributes();
+				gr_set_mode(Game_screen_mode);
+				if (Game_wind)
+					ogl_cache_level_textures();
+			}
+		}
+	}
 #endif
 }
 
@@ -2378,48 +3251,87 @@ void do_sound_menu()
 
 int menu_misc_options_handler ( newmenu *menu, d_event *event, void *userdata );
 
-void print_ship_color(char* color_string, int color_value) {
+void get_color_name(char* color_name, int color_name_length, int color_value, int use_alternate_colors)
+{
+	switch (color_value) {
+		case 0:  snprintf(color_name, color_name_length, "%s", "Blue"); break;
+		case 1:  snprintf(color_name, color_name_length, "%s", "Red"); break;
+		case 2:  snprintf(color_name, color_name_length, "%s", "Green"); break;
+		case 3:  snprintf(color_name, color_name_length, "%s", "Pink"); break;
+		case 4:  snprintf(color_name, color_name_length, "%s", "Orange"); break;
+		case 5:
+			if (use_alternate_colors)
+				snprintf(color_name, color_name_length, "%s", "Purple");
+			else
+				snprintf(color_name, color_name_length, "%s", "Tan");
+			break;
+		case 6:
+			if (use_alternate_colors)
+				snprintf(color_name, color_name_length, "%s", "White");
+			else
+				snprintf(color_name, color_name_length, "%s", "Mint");
+			break;
+		case 7:  snprintf(color_name, color_name_length, "%s", "Yellow"); break;
+		default: snprintf(color_name, color_name_length, "%s", "???");
+	}
+}
+
+void print_ship_color(char* color_string, int color_string_length, int color_value)
+{
 	char color[10];
-	switch(color_value) {
-		case 0:  sprintf(color, "%s", "Blue"); break;
-		case 1:  sprintf(color, "%s", "Red"); break;
-		case 2:  sprintf(color, "%s", "Green"); break;
-		case 3:  sprintf(color, "%s", "Pink"); break;
-		case 4:  sprintf(color, "%s", "Orange"); break;
-		case 5:  sprintf(color, "%s", "Purple"); break;
-		case 6:  sprintf(color, "%s", "White"); break;
-		case 7:  sprintf(color, "%s", "Yellow"); break;
-		case 8:  sprintf(color, "%s", "None"); break;
-		default: sprintf(color, "%s", "???"); 
-	}
+	if (color_value == 8)
+		snprintf(color, SDL_arraysize(color), "%s", "Default");
+	else
+		get_color_name(color, SDL_arraysize(color), color_value, 1);
 
-
-	sprintf( color_string, "Wing Color: %s", color);
+	snprintf(color_string, color_string_length, "Wing Color: %s", color);
 }
 
-void print_missile_color(char* color_string, int color_value) {
+void print_missile_color(char* color_string, int color_string_length, int color_value)
+{
 	char color[11];
-	switch(color_value) {
-		case 0:  sprintf(color, "%s", "Blue"); break;
-		case 1:  sprintf(color, "%s", "Red"); break;
-		case 2:  sprintf(color, "%s", "Green"); break;
-		case 3:  sprintf(color, "%s", "Pink"); break;
-		case 4:  sprintf(color, "%s", "Orange"); break;
-		case 5:  sprintf(color, "%s", "Purple"); break;
-		case 6:  sprintf(color, "%s", "White"); break;
-		case 7:  sprintf(color, "%s", "Yellow"); break;
-		case 8:  sprintf(color, "%s", "Match Ship"); break;
-		default: sprintf(color, "%s", "???"); 
-	}
+	if (color_value == 8)
+		snprintf(color, SDL_arraysize(color), "%s", "Match Ship");
+	else
+		get_color_name(color, SDL_arraysize(color), color_value, 1);
 
-
-	sprintf( color_string, "Missiles/Guns: %s", color);
+	snprintf(color_string, color_string_length, "Missiles/Guns: %s", color);
 }
+
+void print_my_team_color(char* color_string, int color_string_length, int color_value)
+{
+	char color[10];
+	if (color_value == 8)
+		snprintf(color, SDL_arraysize(color), "%s", "Default");
+	else
+		get_color_name(color, SDL_arraysize(color), color_value, 1);
+
+	snprintf(color_string, color_string_length, "My Team: %s", color);
+}
+
+void print_other_team_color(char* color_string, int color_string_length, int color_value)
+{
+	char color[10];
+	if (color_value == 8)
+		snprintf(color, SDL_arraysize(color), "%s", "Default");
+	else
+		get_color_name(color, SDL_arraysize(color), color_value, 1);
+
+	snprintf(color_string, color_string_length, "Other Team: %s", color);
+}
+
+struct misc_menu_data {
+	char preferred_color[30];
+	char missile_color[30];
+	char my_team_color[30];
+	char other_team_color[30];
+};
 
 void do_misc_menu()
 {
-	newmenu_item m[20];
+	newmenu_item m[47];
 	int i = 0;
+	struct misc_menu_data misc_menu_data;
 
 	do {
 		ADD_CHECK(0, "Ship auto-leveling", PlayerCfg.AutoLeveling);
@@ -2429,35 +3341,132 @@ void do_misc_menu()
 		ADD_CHECK(4, "Escort robot hot keys",PlayerCfg.EscortHotKeys);
 		ADD_CHECK(5, "Persistent Debris",PlayerCfg.PersistentDebris);
 		ADD_CHECK(6, "Screenshots w/o HUD",PlayerCfg.PRShot);
-		ADD_CHECK(7, "Movie Subtitles",GameCfg.MovieSubtitles);
-		ADD_CHECK(8, "No redundant pickup messages",PlayerCfg.NoRedundancy);
-		ADD_CHECK(9, "Show Player chat only (Multi)",PlayerCfg.MultiMessages);
-		ADD_CHECK(10, "No Rankings (Multi)",PlayerCfg.NoRankings);
-		ADD_CHECK(11, "Free Flight controls in Automap",PlayerCfg.AutomapFreeFlight);
-		ADD_CHECK(12, "XL style controls in Automap",PlayerCfg.AutomapXL);
-		ADD_CHECK(13, "No Weapon Autoselect when firing",PlayerCfg.NoFireAutoselect);
-		ADD_CHECK(14, "Autoselect after firing",PlayerCfg.SelectAfterFire);
-		ADD_CHECK(15, "Only Cycle Autoselect Weapons",PlayerCfg.CycleAutoselectOnly);
-		ADD_CHECK(16, "Ammo Warnings",PlayerCfg.VulcanAmmoWarnings);
-		ADD_CHECK(17, "Shield Warnings",PlayerCfg.ShieldWarnings);
 
-		char preferred_color[30];
-		print_ship_color(preferred_color, PlayerCfg.ShipColor); 
-		m[18].type = NM_TYPE_SLIDER;
-		m[18].value= PlayerCfg.ShipColor;
-		m[18].text= preferred_color;
-		m[18].min_value=0;
-		m[18].max_value=8;
+		// IGT/RTA speedrun timer readout on the HUD. Defaults on; the clocks
+		// keep accumulating underneath either way, this only controls
+		// visibility, so toggling it off and on again does not lose the time.
+		ADD_CHECK(7, "Show IGT and RTA Speed Run Timers", PlayerCfg.ShowSpeedrunTimers);
 
-		char missile_color[30];
-		print_missile_color(missile_color, PlayerCfg.MissileColor); 
-		m[19].type = NM_TYPE_SLIDER;
-		m[19].value= PlayerCfg.MissileColor;
-		m[19].text= missile_color;
-		m[19].min_value=0;
-		m[19].max_value=8;
+		// Velocity/rotation HUD readout. Gated on PlayerCfg.ShowVelocityMeter;
+		// the values are recorded to demos regardless, this only controls
+		// whether the readout is drawn.
+		ADD_CHECK(8, "Show Velocity and Rotation", PlayerCfg.ShowVelocityMeter);
 
-		i = newmenu_do1( NULL, "Misc Options", sizeof(m)/sizeof(*m), m, menu_misc_options_handler, NULL, i );
+		// Blank spacer, so the toggles above do not visually merge into the
+		// "Demo Recording Indicator:" block below it.
+		m[9].type = NM_TYPE_TEXT;
+		m[9].text = "";
+
+		m[10].type = NM_TYPE_TEXT;
+		m[10].text = "Demo Recording Indicator:";
+
+		m[11].type = NM_TYPE_RADIO;
+		m[11].text = "Full Text";
+		m[11].group = 1;
+		m[11].value = (PlayerCfg.DemoRecordingIndicator == 0);
+
+		m[12].type = NM_TYPE_RADIO;
+		m[12].text = "Recording Icon";
+		m[12].group = 1;
+		m[12].value = (PlayerCfg.DemoRecordingIndicator == 1);
+
+		m[13].type = NM_TYPE_RADIO;
+		m[13].text = "None";
+		m[13].group = 1;
+		m[13].value = (PlayerCfg.DemoRecordingIndicator == 2);
+
+		m[14].type = NM_TYPE_TEXT;
+		m[14].text = "";
+
+		m[15].type = NM_TYPE_TEXT;
+		m[15].text = "Automatically Start Demos:";
+
+		ADD_CHECK(16, "Single-Player", PlayerCfg.AutoDemoSp);
+		ADD_CHECK(17, "Multiplayer", PlayerCfg.AutoDemoMp);
+		ADD_CHECK(18, "Silent (Don't Show Prompts)", PlayerCfg.AutoDemoHideUi);
+
+		m[19].type = NM_TYPE_TEXT;
+		m[19].text = "";
+
+		ADD_CHECK(20, "Movie Subtitles",GameCfg.MovieSubtitles);
+		ADD_CHECK(21, "Suppress HUD Messages (SP)",PlayerCfg.NoRedundancy);
+		ADD_CHECK(22, "Show Player chat only (Multi)",PlayerCfg.MultiMessages);
+		ADD_CHECK(23, "No Rankings (Multi)",PlayerCfg.NoRankings);
+		// Row 24 was a spacer (D2 has no D1 BombGauge toggle); it now holds Automap XL.
+		ADD_CHECK(24, "XL style controls in Automap",PlayerCfg.AutomapXL);
+		ADD_CHECK(25, "Free Flight controls in Automap",PlayerCfg.AutomapFreeFlight);
+		ADD_CHECK(26, "No Weapon Autoselect when firing",PlayerCfg.NoFireAutoselect);
+		ADD_CHECK(27, "Autoselect after firing",PlayerCfg.SelectAfterFire);
+		ADD_CHECK(28, "Only Cycle Autoselect Weapons",PlayerCfg.CycleAutoselectOnly);
+		ADD_CHECK(29, "Classic No Ammo Autoselect",PlayerCfg.ClassicAutoselectWeapon);
+		ADD_CHECK(30, "Autoselect only once", PlayerCfg.AutoselectOnlyOnce);
+		ADD_CHECK(31, "Ammo Warnings",PlayerCfg.VulcanAmmoWarnings);
+		ADD_CHECK(32, "Shield Warnings",PlayerCfg.ShieldWarnings);
+		ADD_CHECK(33, "No Player Chat Sound",PlayerCfg.NoChatSound);
+		ADD_CHECK(34, "Show Observer Messages",PlayerCfg.ShowObsMessages);
+
+		m[35].type = NM_TYPE_TEXT;
+		m[35].text = "";
+
+		m[36].type = NM_TYPE_TEXT;
+		m[36].text = "My Ship Colors:";
+
+		print_ship_color(misc_menu_data.preferred_color, SDL_arraysize(misc_menu_data.preferred_color),
+			PlayerCfg.ShipColor);
+		m[37].type = NM_TYPE_SLIDER;
+		m[37].value = PlayerCfg.ShipColor;
+		m[37].text = misc_menu_data.preferred_color;
+		m[37].min_value = 0;
+		m[37].max_value = 8;
+
+		print_missile_color(misc_menu_data.missile_color, SDL_arraysize(misc_menu_data.missile_color),
+			PlayerCfg.MissileColor);
+		m[38].type = NM_TYPE_SLIDER;
+		m[38].value = PlayerCfg.MissileColor;
+		m[38].text = misc_menu_data.missile_color;
+		m[38].min_value = 0;
+		m[38].max_value = 8;
+
+		ADD_CHECK(39, "Show Custom Ship Colors", PlayerCfg.ShowCustomColors);
+
+		m[40].type = NM_TYPE_TEXT;
+		m[40].text = "";
+
+		m[41].type = NM_TYPE_TEXT;
+		m[41].text = "Team Colors:";
+
+		print_my_team_color(misc_menu_data.my_team_color, SDL_arraysize(misc_menu_data.my_team_color),
+			PlayerCfg.MyTeamColor);
+		m[42].type = NM_TYPE_SLIDER;
+		m[42].value = PlayerCfg.MyTeamColor;
+		m[42].text = misc_menu_data.my_team_color;
+		m[42].min_value = 0;
+		m[42].max_value = 8;
+
+		print_other_team_color(misc_menu_data.other_team_color, SDL_arraysize(misc_menu_data.other_team_color),
+			PlayerCfg.OtherTeamColor);
+		m[43].type = NM_TYPE_SLIDER;
+		m[43].value = PlayerCfg.OtherTeamColor;
+		m[43].text = misc_menu_data.other_team_color;
+		m[43].min_value = 0;
+		m[43].max_value = 8;
+
+		if (PlayerCfg.MyTeamColor == 8 && PlayerCfg.OtherTeamColor == 8) {
+			// If we're not setting explicit team colors, we don't override what the game host picked
+			m[44].type = NM_TYPE_TEXT;
+			m[44].text = "Ignore Per-Game Team Colors (N/A)";
+		} else {
+			m[44].type = NM_TYPE_CHECK;
+			m[44].text = "Ignore Per-Game Team Colors";
+		}
+		m[44].value = PlayerCfg.PreferMyTeamColors;
+
+		m[45].type = NM_TYPE_TEXT;
+		m[45].text = "";
+
+		ADD_CHECK(46, "Original D1 Weapons (SP)", PlayerCfg.OriginalD1Weapons);
+
+		i = newmenu_do1(NULL, "Misc Options", SDL_arraysize(m), m, menu_misc_options_handler, &misc_menu_data, i);
 
 		PlayerCfg.AutoLeveling			= m[0].value;
 		PlayerCfg.MissileViewEnabled   		= m[1].value;
@@ -2466,39 +3475,302 @@ void do_misc_menu()
 		PlayerCfg.EscortHotKeys			= m[4].value;
 		PlayerCfg.PersistentDebris		= m[5].value;
 		PlayerCfg.PRShot 			= m[6].value;
-		GameCfg.MovieSubtitles 			= m[7].value;
-		PlayerCfg.NoRedundancy 			= m[8].value;
-		PlayerCfg.MultiMessages 		= m[9].value;
-		PlayerCfg.NoRankings 			= m[10].value;
-		PlayerCfg.AutomapFreeFlight		= m[11].value;
-		PlayerCfg.AutomapXL				= m[12].value;
-		PlayerCfg.NoFireAutoselect		= m[13].value;
-		PlayerCfg.SelectAfterFire		= m[14].value; if(PlayerCfg.SelectAfterFire) { PlayerCfg.NoFireAutoselect = 1; }
-		PlayerCfg.CycleAutoselectOnly	= m[15].value;
-		PlayerCfg.VulcanAmmoWarnings	= m[16].value;
-		PlayerCfg.ShieldWarnings		= m[17].value;
+		PlayerCfg.ShowSpeedrunTimers	= m[7].value;
+		PlayerCfg.ShowVelocityMeter		= m[8].value;
+		if (m[11].value) {
+			PlayerCfg.DemoRecordingIndicator = 0;
+		}
+		else if (m[12].value) {
+			PlayerCfg.DemoRecordingIndicator = 1;
+		}
+		else if (m[13].value) {
+			PlayerCfg.DemoRecordingIndicator = 2;
+		}
+		PlayerCfg.AutoDemoSp			= m[16].value;
+		PlayerCfg.AutoDemoMp			= m[17].value;
+		PlayerCfg.AutoDemoHideUi		= m[18].value;
+		GameCfg.MovieSubtitles 			= m[20].value;
+		PlayerCfg.NoRedundancy 			= m[21].value;
+		PlayerCfg.MultiMessages 		= m[22].value;
+		PlayerCfg.NoRankings 			= m[23].value;
+		PlayerCfg.AutomapXL			= m[24].value;
+		PlayerCfg.AutomapFreeFlight		= m[25].value;
+		PlayerCfg.NoFireAutoselect		= m[26].value;
+		PlayerCfg.SelectAfterFire		= m[27].value; if(PlayerCfg.SelectAfterFire) { PlayerCfg.NoFireAutoselect = 1; }
+		PlayerCfg.CycleAutoselectOnly		= m[28].value;
+		PlayerCfg.ClassicAutoselectWeapon = m[29].value;
+		PlayerCfg.AutoselectOnlyOnce = m[30].value;
+		PlayerCfg.VulcanAmmoWarnings = m[31].value;
+		PlayerCfg.ShieldWarnings = m[32].value;
+		PlayerCfg.NoChatSound = m[33].value;
+		PlayerCfg.ShowObsMessages = m[34].value;
+		PlayerCfg.ShowCustomColors = m[39].value;
+		PlayerCfg.PreferMyTeamColors = (PlayerCfg.MyTeamColor == 8 && PlayerCfg.OtherTeamColor == 8) ? 0 : m[44].value;
+		PlayerCfg.OriginalD1Weapons = m[46].value;
 
 	} while( i>-1 );
 
+	// Update team colors if they were changed during a game
+	if ((Game_mode & GM_TEAM) && (Network_status == NETSTAT_PLAYING)) {
+		for (int i = 0; i < N_players; i++)
+			if (Players[i].connected)
+				multi_reset_object_texture(&Objects[Players[i].objnum]);
+	}
 }
 
-int menu_misc_options_handler ( newmenu *menu, d_event *event, void *userdata )
+int menu_misc_options_handler(newmenu* menu, d_event* event, void* userdata)
 {
 	newmenu_item *menus = newmenu_get_items(menu);
 	int citem = newmenu_get_citem(menu);
+	struct misc_menu_data* menu_data = (struct misc_menu_data*)userdata;
 	
-	if (event->type == EVENT_NEWMENU_CHANGED)
-	{
-		if (citem == 17) {
-			PlayerCfg.ShipColor = menus[17].value;
-			print_ship_color(menus[17].text, PlayerCfg.ShipColor);
-			
-		} else if (citem == 18) {
-			PlayerCfg.MissileColor = menus[18].value;
-			print_missile_color(menus[18].text, PlayerCfg.MissileColor);
-			
+	if (event->type == EVENT_NEWMENU_CHANGED) {
+		if (citem == 37) {
+			PlayerCfg.ShipColor = menus[citem].value;
+			print_ship_color(menu_data->preferred_color, SDL_arraysize(menu_data->preferred_color),
+				PlayerCfg.ShipColor);
+		} else if (citem == 38) {
+			PlayerCfg.MissileColor = menus[citem].value;
+			print_missile_color(menu_data->missile_color, SDL_arraysize(menu_data->missile_color),
+				PlayerCfg.MissileColor);
+		} else if (citem == 42) {
+			PlayerCfg.MyTeamColor = menus[citem].value;
+			print_my_team_color(menu_data->my_team_color, SDL_arraysize(menu_data->my_team_color),
+				PlayerCfg.MyTeamColor);
+		} else if (citem == 43) {
+			PlayerCfg.OtherTeamColor = menus[citem].value;
+			print_other_team_color(menu_data->other_team_color, SDL_arraysize(menu_data->other_team_color),
+				PlayerCfg.OtherTeamColor);
 		}
 
+		if (PlayerCfg.MyTeamColor == 8 && PlayerCfg.OtherTeamColor == 8) {
+			menus[44].type = NM_TYPE_TEXT;
+			menus[44].text = "Ignore Per-Game Team Colors (N/A)";
+		} else {
+			menus[44].type = NM_TYPE_CHECK;
+			menus[44].text = "Ignore Per-Game Team Colors";
+		}
+	}
+
+	return 0;
+}
+
+int menu_obs_options_handler ( newmenu *menu, d_event *event, void *userdata );
+int select_obs_game_mode_handler(listbox* lb, d_event* event, void* userdata);
+
+const char* Obs_mode_names[] = { "1v1", "FFA", "Teams", "Coop" };
+struct obs_menu_data
+{
+	newmenu* menu;
+	int mode;
+};
+#define OBS_MENU_MODE_SWITCHED -2
+#define OBS_MENU_OVERWRITE_MODES -3
+
+void do_obs_menu()
+{
+	newmenu_item m[33];
+	struct obs_menu_data obs_menu_data;
+	obs_menu_data.mode = is_observer() ? get_observer_game_mode() : 0;
+	int i = 0;
+
+	do {
+		int cmode = obs_menu_data.mode;
+
+		char mode_text[40];
+		snprintf(mode_text, SDL_arraysize(mode_text), "Currently configuring: %s",
+			PlayerCfg.ObsShareSettings ? "All" : Obs_mode_names[cmode]);
+		m[0].type = NM_TYPE_TEXT;
+		m[0].text = mode_text;
+
+		if (PlayerCfg.ObsShareSettings) {
+			m[1].type = NM_TYPE_TEXT;
+			m[1].text = "Switch Game Mode (N/A)";
+		} else {
+			m[1].type = NM_TYPE_MENU;
+			m[1].text = "Switch Game Mode";
+		}
+
+		ADD_CHECK(2, "Share Settings Across Modes", PlayerCfg.ObsShareSettings);
+
+		m[3].type = NM_TYPE_TEXT;
+		m[3].text = "";
+
+		ADD_CHECK(4, "Fly Fast", PlayerCfg.ObsTurbo[cmode]);
+		ADD_CHECK(5, "Show Cockpit in First Person", PlayerCfg.ObsShowCockpit[cmode]);
+
+		m[6].type = NM_TYPE_TEXT;
+		m[6].text = "";
+
+		m[7].type = NM_TYPE_TEXT;
+		m[7].text = "Show on Scoreboard:";
+
+		ADD_CHECK(8, "Shield Text", PlayerCfg.ObsShowScoreboardShieldText[cmode]);
+		ADD_CHECK(9, "Shield Bar", PlayerCfg.ObsShowScoreboardShieldBar[cmode]);
+		ADD_CHECK(10, "Energy and Ammo Bars", PlayerCfg.ObsShowAmmoBars[cmode]);
+		ADD_CHECK(11, "Primary Weapon", PlayerCfg.ObsShowPrimary[cmode]);
+		ADD_CHECK(12, "Secondary Weapon", PlayerCfg.ObsShowSecondary[cmode]);
+
+		m[13].type = NM_TYPE_TEXT;
+		m[13].text = "";
+
+		m[14].type = NM_TYPE_TEXT;
+		m[14].text = "Show on Player:";
+
+		ADD_CHECK(15, "Player Names", PlayerCfg.ObsShowNames[cmode]);
+		ADD_CHECK(16, "Damage Text", PlayerCfg.ObsShowDamage[cmode]);
+		ADD_CHECK(17, "Shield Text", PlayerCfg.ObsShowShieldText[cmode]);
+		ADD_CHECK(18, "Shield Bar", PlayerCfg.ObsShowShieldBar[cmode]);
+
+		m[19].type = NM_TYPE_TEXT;
+		m[19].text = "";
+
+		m[20].type = NM_TYPE_TEXT;
+		m[20].text = "Show Information:";
+
+		ADD_CHECK(21, "Kill Feed", PlayerCfg.ObsShowKillFeed[cmode]);
+		ADD_CHECK(22, "Death Summary", PlayerCfg.ObsShowDeathSummary[cmode]);
+		ADD_CHECK(23, "Streaks and Runs", PlayerCfg.ObsShowStreaks[cmode]);
+		ADD_CHECK(24, "Kills over Time Graph", PlayerCfg.ObsShowKillGraph[cmode]);
+		ADD_CHECK(25, "Damage Breakdown", PlayerCfg.ObsShowBreakdown[cmode]);
+		ADD_CHECK(26, "List of Observers", PlayerCfg.ObsShowObs[cmode]);
+		ADD_CHECK(27, "Observer Chat", PlayerCfg.ObsChat[cmode]);
+		ADD_CHECK(28, "Player Chat", PlayerCfg.ObsPlayerChat[cmode]);
+		ADD_CHECK(29, "Bomb/Mine Countdowns", PlayerCfg.ObsShowBombTimes[cmode]);
+		ADD_CHECK(30, "Transparent third person ship", PlayerCfg.ObsTransparentThirdPerson[cmode]);
+		ADD_CHECK(31, "Increase third person distance", PlayerCfg.ObsIncreaseThirdPersonDist[cmode]);
+		ADD_CHECK(32, "Hide energy weapon muzzle", PlayerCfg.ObsHideEnergyWeaponMuzzle[cmode]);
+
+		i = newmenu_do1(NULL, "JinX Mode Options", SDL_arraysize(m), m, menu_obs_options_handler, &obs_menu_data, i);
+
+		PlayerCfg.ObsShareSettings = m[2].value;
+		// Note: obs_menu_data.mode may have changed; we kept a copy in cmode which we use here
+		PlayerCfg.ObsTurbo[cmode] = m[4].value;
+		PlayerCfg.ObsShowCockpit[cmode] = m[5].value;
+		PlayerCfg.ObsShowScoreboardShieldText[cmode] = m[8].value;
+		PlayerCfg.ObsShowScoreboardShieldBar[cmode] = m[9].value;
+		PlayerCfg.ObsShowAmmoBars[cmode] = m[10].value;
+		PlayerCfg.ObsShowPrimary[cmode] = m[11].value;
+		PlayerCfg.ObsShowSecondary[cmode] = m[12].value;
+		PlayerCfg.ObsShowNames[cmode] = m[15].value;
+		PlayerCfg.ObsShowDamage[cmode] = m[16].value;
+		PlayerCfg.ObsShowShieldText[cmode] = m[17].value;
+		PlayerCfg.ObsShowShieldBar[cmode] = m[18].value;
+		PlayerCfg.ObsShowKillFeed[cmode] = m[21].value;
+		PlayerCfg.ObsShowDeathSummary[cmode] = m[22].value;
+		PlayerCfg.ObsShowStreaks[cmode] = m[23].value;
+		PlayerCfg.ObsShowKillGraph[cmode] = m[24].value;
+		PlayerCfg.ObsShowBreakdown[cmode] = m[25].value;
+		PlayerCfg.ObsShowObs[cmode] = m[26].value;
+		PlayerCfg.ObsChat[cmode] = m[27].value;
+		PlayerCfg.ObsPlayerChat[cmode] = m[28].value;
+		PlayerCfg.ObsShowBombTimes[cmode] = m[29].value;
+		PlayerCfg.ObsTransparentThirdPerson[cmode] = m[30].value;
+		PlayerCfg.ObsIncreaseThirdPersonDist[cmode] = m[31].value;
+		PlayerCfg.ObsHideEnergyWeaponMuzzle[cmode] = m[32].value;
+
+		// Only update other modes *after* we update the current one; user may have changed something
+		if (i == OBS_MENU_OVERWRITE_MODES || PlayerCfg.ObsShareSettings)
+		{
+			for (int i = 0; i < SDL_arraysize(Obs_mode_names); i++)
+			{
+				if (i == cmode)
+					continue;
+
+				PlayerCfg.ObsTurbo[i] = PlayerCfg.ObsTurbo[cmode];
+				PlayerCfg.ObsShowCockpit[i] = PlayerCfg.ObsShowCockpit[cmode];
+				PlayerCfg.ObsShowScoreboardShieldText[i] = PlayerCfg.ObsShowScoreboardShieldText[cmode];
+				PlayerCfg.ObsShowScoreboardShieldBar[i] = PlayerCfg.ObsShowScoreboardShieldBar[cmode];
+				PlayerCfg.ObsShowAmmoBars[i] = PlayerCfg.ObsShowAmmoBars[cmode];
+				PlayerCfg.ObsShowPrimary[i] = PlayerCfg.ObsShowPrimary[cmode];
+				PlayerCfg.ObsShowSecondary[i] = PlayerCfg.ObsShowSecondary[cmode];
+				PlayerCfg.ObsShowNames[i] = PlayerCfg.ObsShowNames[cmode];
+				PlayerCfg.ObsShowDamage[i] = PlayerCfg.ObsShowDamage[cmode];
+				PlayerCfg.ObsShowShieldText[i] = PlayerCfg.ObsShowShieldText[cmode];
+				PlayerCfg.ObsShowShieldBar[i] = PlayerCfg.ObsShowShieldBar[cmode];
+				PlayerCfg.ObsShowKillFeed[i] = PlayerCfg.ObsShowKillFeed[cmode];
+				PlayerCfg.ObsShowDeathSummary[i] = PlayerCfg.ObsShowDeathSummary[cmode];
+				PlayerCfg.ObsShowStreaks[i] = PlayerCfg.ObsShowStreaks[cmode];
+				PlayerCfg.ObsShowKillGraph[i] = PlayerCfg.ObsShowKillGraph[cmode];
+				PlayerCfg.ObsShowBreakdown[i] = PlayerCfg.ObsShowBreakdown[cmode];
+				PlayerCfg.ObsShowObs[i] = PlayerCfg.ObsShowObs[cmode];
+				PlayerCfg.ObsChat[i] = PlayerCfg.ObsChat[cmode];
+				PlayerCfg.ObsPlayerChat[i] = PlayerCfg.ObsPlayerChat[cmode];
+				PlayerCfg.ObsShowBombTimes[i] = PlayerCfg.ObsShowBombTimes[cmode];
+				PlayerCfg.ObsTransparentThirdPerson[i] = PlayerCfg.ObsTransparentThirdPerson[cmode];
+				PlayerCfg.ObsIncreaseThirdPersonDist[i] = PlayerCfg.ObsIncreaseThirdPersonDist[cmode];
+				PlayerCfg.ObsHideEnergyWeaponMuzzle[i] = PlayerCfg.ObsHideEnergyWeaponMuzzle[cmode];
+			}
+		}
+	} while (i > -1 || i == OBS_MENU_MODE_SWITCHED || i == OBS_MENU_OVERWRITE_MODES);
+}
+
+int menu_obs_options_handler ( newmenu *menu, d_event *event, void *userdata )
+{
+	int citem = newmenu_get_citem(menu);
+	struct obs_menu_data* obs_menu_data = (struct obs_menu_data*)userdata;
+	obs_menu_data->menu = menu;
+	int cmode = obs_menu_data->mode;
+
+	switch (event->type)
+	{
+		case EVENT_NEWMENU_CHANGED:
+			if (citem == 2) {
+				newmenu_item* item = &newmenu_get_items(obs_menu_data->menu)[citem];
+				if (item->value == 1) {
+					// The user enabled sharing settings. Double-check that this is what they want
+					int overwrite = nm_messagebox(NULL, 2, "No", "Yes",
+						"Are you sure you want to\nreplace settings for\n"
+						"all game modes with the\ncurrent settings?");
+					if (overwrite == 1) {
+						newmenu_set_rval(obs_menu_data->menu, OBS_MENU_OVERWRITE_MODES);
+						window_close(newmenu_get_window(obs_menu_data->menu));
+						return 1;
+					} else {
+						// No? Then we switch the checkbox back off again
+						item->value = 0;
+					}
+				} else {
+					// We actually need to run an overwrite here too; if the user changed other
+					// settings before flipping this checkbox, it's going to be confusing if only
+					// the first game mode gets those changes.
+					newmenu_set_rval(obs_menu_data->menu, OBS_MENU_OVERWRITE_MODES);
+					window_close(newmenu_get_window(obs_menu_data->menu));
+					return 1;
+				}
+			}
+			break;
+
+		case EVENT_NEWMENU_SELECTED:
+			if (citem == 1) {
+				newmenu_listbox1("Select Game Mode", SDL_arraysize(Obs_mode_names), (char **)Obs_mode_names,
+					1, cmode, select_obs_game_mode_handler, obs_menu_data);
+				return 1;
+			}
+			break;
+
+		default:
+			break;
+	}
+
+	return 0;
+}
+
+int select_obs_game_mode_handler(listbox* lb, d_event* event, void* userdata)
+{
+	int citem = listbox_get_citem(lb);
+	struct obs_menu_data* obs_menu_data = (struct obs_menu_data*)userdata;
+
+	switch (event->type)
+	{
+		case EVENT_NEWMENU_SELECTED:
+			obs_menu_data->mode = citem;
+			newmenu_set_rval(obs_menu_data->menu, OBS_MENU_MODE_SWITCHED);
+			window_close(newmenu_get_window(obs_menu_data->menu));
+			break;
+
+		default:
+			break;
 	}
 
 	return 0;
@@ -2562,7 +3834,7 @@ void do_options_menu()
 {
 	newmenu_item *m;
 
-	MALLOC(m, newmenu_item, 10);
+	MALLOC(m, newmenu_item, 11);
 	if (!m)
 		return;
 
@@ -2576,10 +3848,11 @@ void do_options_menu()
 	m[ 7].type = NM_TYPE_MENU;   m[ 7].text="Primary autoselect ordering...";
 	m[ 8].type = NM_TYPE_MENU;   m[ 8].text="Secondary autoselect ordering...";
 	m[ 9].type = NM_TYPE_MENU;   m[ 9].text="Misc Options...";
+	m[10].type = NM_TYPE_MENU;   m[10].text="Observer Options...";
 
 	// Fall back to main event loop
 	// Allows clean closing and re-opening when resolution changes
-	newmenu_do3( NULL, TXT_OPTIONS, 10, m, options_menuset, NULL, 0, NULL );
+	newmenu_do3( NULL, TXT_OPTIONS, 11, m, options_menuset, NULL, 0, NULL );
 }
 
 #ifndef RELEASE

@@ -12,6 +12,8 @@
 #define HM_MULTI		2 // a message related to multiplayer (game and player messages)
 #define HM_REDUNDANT		4 // "you already have..."-type messages. stuff a player is able to supress
 #define HM_MAYDUPL		8 // messages that might appear once per frame. for these we want to check all messages we have  in queue and supress it if so
+#define HM_KILLFEED		0x10 // messages describing multiplayer kills/deaths
+#define HM_GUIDEBOT		0x20 // Guide-Bot chatter/status; behind its own Shift+F4 toggle
 
 extern int HUD_toolong;
 extern void HUD_clear_messages();

@@ -70,6 +70,11 @@ extern int newmenu_do2(char *title, char *subtitle, int nitems, newmenu_item *it
 // Same as above, but returns menu instead of citem
 extern newmenu *newmenu_do3(char *title, char *subtitle, int nitems, newmenu_item *item, int (*subfunction)(newmenu *menu, d_event *event, void *userdata), void *userdata, int citem, char *filename);
 
+// Nudges the NEXT menu created rightwards by px pixels, authored against the
+// 2560x1440 menu background and scaled to the canvas width. One-shot: consumed by
+// the next menu built, so all other menus stay exactly centred.
+extern void newmenu_set_x_nudge(int px);
+
 // Tiny menu with GAME_FONT
 extern newmenu *newmenu_dotiny(char * title, char * subtitle, int nitems, newmenu_item * item, int TabsFlag, int (*subfunction)(newmenu *menu, d_event *event, void *userdata), void *userdata);
 
@@ -111,8 +116,10 @@ newmenu_item *newmenu_get_items(newmenu *menu);
 int newmenu_get_nitems(newmenu *menu);
 int newmenu_get_citem(newmenu *menu);
 struct window *newmenu_get_window(newmenu *menu);
+void newmenu_set_rval(newmenu *menu, int rval);
 void nm_draw_background(int x1, int y1, int x2, int y2);
 void nm_restore_background(int x, int y, int w, int h);
+void nm_draw_background1(char * filename); // full-screen menu background, e.g. the main menu or stars
 
 extern const char *Newmenu_allowed_chars;
 
@@ -155,18 +162,18 @@ extern void newmenu_free_background();
 
 #define NEWMENU_MOUSE
 
-// #define NORMAL_CHECK_BOX    "Å"
-// #define CHECKED_CHECK_BOX   "Ç"
+// #define NORMAL_CHECK_BOX    "ÔøΩ"
+// #define CHECKED_CHECK_BOX   "ÔøΩ"
 // 
 // #define NORMAL_RADIO_BOX    ""
-// #define CHECKED_RADIO_BOX   "Ä"
+// #define CHECKED_RADIO_BOX   "ÔøΩ"
 // #define CURSOR_STRING       "_"
-// #define SLIDER_LEFT         "É"  // 131
-// #define SLIDER_RIGHT        "Ñ"  // 132
-// #define SLIDER_MIDDLE       "Ö"  // 133
-// #define SLIDER_MARKER       "Ü"  // 134
-// #define UP_ARROW_MARKER     "á"  // 135
-// #define DOWN_ARROW_MARKER   "à"  // 136
+// #define SLIDER_LEFT         "ÔøΩ"  // 131
+// #define SLIDER_RIGHT        "ÔøΩ"  // 132
+// #define SLIDER_MIDDLE       "ÔøΩ"  // 133
+// #define SLIDER_MARKER       "ÔøΩ"  // 134
+// #define UP_ARROW_MARKER     "ÔøΩ"  // 135
+// #define DOWN_ARROW_MARKER   "ÔøΩ"  // 136
 #define NORMAL_CHECK_BOX    "\201"
 #define CHECKED_CHECK_BOX   "\202"
 

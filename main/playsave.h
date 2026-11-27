@@ -46,6 +46,7 @@ typedef struct player_config
 	ubyte PrimaryOrder[MAX_PRIMARY_WEAPONS+1];
 	ubyte SecondaryOrder[MAX_SECONDARY_WEAPONS+1];
 	ubyte KeySettings[3][MAX_CONTROLS];
+	ubyte ObserverControlSettings[NUM_OBSERVER_BINDING_TYPES][NUM_OBSERVER_BINDING_SLOTS];
 	ubyte KeySettingsD2X[MAX_D2X_CONTROLS];
 	int DefaultDifficulty;
 	int AutoLeveling;
@@ -63,7 +64,8 @@ typedef struct player_config
 	int JoystickTurnLimit[2];
 	int MouseFSDead;
 	int MouseFSIndicator;
-	int CockpitMode[2]; // 0 saves the "real" cockpit, 1 also saves letterbox and rear. Used to properly switch between modes and restore the real one.
+	int PreferredCockpitMode;
+	int CurrentCockpitMode; // Also includes letterbox/rear, which are not persisted in the player profile
 	int Cockpit3DView[2];
 	char NetworkMessageMacro[4][MAX_MESSAGE_LEN];
 	int NetlifeKills;
@@ -80,26 +82,67 @@ typedef struct player_config
 	int EscortHotKeys;
 	int PersistentDebris;
 	int PRShot;
+	int DemoRecordingIndicator;
 	ubyte NoRedundancy;
 	ubyte MultiMessages;
 	ubyte NoRankings;
+	ubyte BombGauge;
 	ubyte AutomapFreeFlight;
 	ubyte AutomapXL;
 	ubyte NoFireAutoselect;
 	ubyte CycleAutoselectOnly;
 	ubyte VulcanAmmoWarnings;
-	ubyte ShieldWarnings; 
+	ubyte ShieldWarnings;
 	ubyte ShieldEffects;    // shield bubbles (yours and other players') and the gauge pulse
 	ubyte UncappedTurning;
-	ubyte QuietPlasma; 	
+	ubyte AutoDemoSp;
+	ubyte AutoDemoMp;
+	ubyte AutoDemoHideUi;
+	ubyte ShowCustomColors;
+	ubyte ShowSpeedrunTimers;  // show the IGT/RTA speedrun timers on the HUD
+	ubyte ShowVelocityMeter;   // show the velocity/rotation HUD readout
+	ubyte PreferMyTeamColors;
+	ubyte QuietPlasma;
 	int AlphaEffects;
 	int DynLightColor;
-	ubyte DisableCockpit;  /* DisableCockpit */ 
-	ubyte StickyRearview; /* StickyRearview */ 
-	ubyte SelectAfterFire; /* SelectAfterFire */ 	
+	ubyte DisableCockpit;  /* DisableCockpit */
+	ubyte StickyRearview; /* StickyRearview */
+	ubyte LastInputWins; // opposite slide/bank: the direction pressed last wins instead of cancelling
+	ubyte SelectAfterFire; /* SelectAfterFire */
 	int maxFps;
-	int ShipColor;	
+	int ShipColor;
 	int MissileColor;
+	int MyTeamColor;
+	int OtherTeamColor;
+	ubyte ObsShareSettings;
+	ubyte ObsTurbo[NUM_OBS_MODES];
+	ubyte ObsShowCockpit[NUM_OBS_MODES];
+	ubyte ObsShowScoreboardShieldText[NUM_OBS_MODES];
+	ubyte ObsShowScoreboardShieldBar[NUM_OBS_MODES];
+	ubyte ObsShowAmmoBars[NUM_OBS_MODES];
+	ubyte ObsShowPrimary[NUM_OBS_MODES];
+	ubyte ObsShowSecondary[NUM_OBS_MODES];
+	ubyte ObsShowNames[NUM_OBS_MODES];
+	ubyte ObsShowDamage[NUM_OBS_MODES];
+	ubyte ObsShowShieldText[NUM_OBS_MODES];
+	ubyte ObsShowShieldBar[NUM_OBS_MODES];
+	ubyte ObsShowKillFeed[NUM_OBS_MODES];
+	ubyte ObsShowDeathSummary[NUM_OBS_MODES];
+	ubyte ObsShowStreaks[NUM_OBS_MODES];
+	ubyte ObsShowKillGraph[NUM_OBS_MODES];
+	ubyte ObsShowBreakdown[NUM_OBS_MODES];
+	ubyte ObsShowObs[NUM_OBS_MODES];
+	ubyte ObsChat[NUM_OBS_MODES];
+	ubyte ObsPlayerChat[NUM_OBS_MODES];
+	ubyte ObsShowBombTimes[NUM_OBS_MODES];
+	ubyte ObsTransparentThirdPerson[NUM_OBS_MODES];
+	ubyte ObsIncreaseThirdPersonDist[NUM_OBS_MODES];
+	ubyte ObsHideEnergyWeaponMuzzle[NUM_OBS_MODES];
+	ubyte NoChatSound;
+	ubyte ShowObsMessages;
+	ubyte ClassicAutoselectWeapon;
+	ubyte AutoselectOnlyOnce;
+	ubyte OriginalD1Weapons;
 } __pack__ player_config;
 
 extern struct player_config PlayerCfg;
@@ -125,5 +168,8 @@ int get_highest_level(void);
 
 void read_netgame_profile(netgame_info *ng);
 void write_netgame_profile(netgame_info *ng);
+
+int read_netgame_settings_file(const char *filename, netgame_info *ng, int no_name);
+int write_netgame_settings_file(const char *filename, netgame_info *ng, int no_name);
 
 #endif /* _PLAYSAVE_H */

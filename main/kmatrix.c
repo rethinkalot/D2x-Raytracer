@@ -130,9 +130,7 @@ void kmatrix_draw_names(int *sorted)
 {
 	int j, x, color;
 
-	if(Netgame.FairColors)
-		selected_player_rgb = player_rgb_all_blue; 
-	else if(Netgame.BlackAndWhitePyros) 
+	if(Netgame.BlackAndWhitePyros) 
 		selected_player_rgb = player_rgb_alt; 
 	else
 		selected_player_rgb = player_rgb;	
@@ -140,9 +138,9 @@ void kmatrix_draw_names(int *sorted)
 	for (j=0; j<N_players; j++)
 	{
 		if (Game_mode & GM_TEAM)
-			color = get_team(sorted[j]);
+			color = get_color_for_team(sorted[j]);
 		else
-			color = Netgame.players[sorted[j]].color;//sorted[j];
+			color = get_color_for_player(sorted[j], 0);//sorted[j];
 
 		x = FSPACX (70 + CENTERING_OFFSET(N_players) + j*25);
 
@@ -214,9 +212,7 @@ void kmatrix_redraw(kmatrix_screen *km)
 	gr_set_current_canvas(NULL);
 	show_fullscr(&km->background);
 
-	if(Netgame.FairColors)
-		selected_player_rgb = player_rgb_all_blue; 
-	else if(Netgame.BlackAndWhitePyros) 
+	if(Netgame.BlackAndWhitePyros) 
 		selected_player_rgb = player_rgb_alt; 
 	else
 		selected_player_rgb = player_rgb;	
@@ -244,9 +240,9 @@ void kmatrix_redraw(kmatrix_screen *km)
 		for (i=0; i<N_players; i++ )
 		{
 			if (Game_mode & GM_TEAM)
-				color = get_team(sorted[i]);
+				color = get_color_for_team(sorted[i]);
 			else
-				color = sorted[i];
+				color = get_color_for_player(sorted[i], 0);//sorted[j];
 
 			if (Players[sorted[i]].connected==CONNECT_DISCONNECTED)
 				gr_set_fontcolor(gr_find_closest_color(31,31,31),-1);
@@ -327,7 +323,7 @@ int kmatrix_handler(window *wind, d_event *event, kmatrix_screen *km)
 			break;
 			
 		case EVENT_WINDOW_DRAW:
-			timer_delay2(50);
+			menu_frame_delay();
 
 			if (km->network)
 				multi_do_protocol_frame(0, 1);
@@ -336,9 +332,10 @@ int kmatrix_handler(window *wind, d_event *event, kmatrix_screen *km)
 
 			// Check if all connected players are also looking at this screen ...
 			for (i = 0; i < MAX_PLAYERS; i++)
-				if (Players[i].connected)
-					if (Players[i].connected != CONNECT_END_MENU && Players[i].connected != CONNECT_DIED_IN_MINE)
-						km->playing = 1;
+				if (Netgame.max_numobservers == 0 || i != OBSERVER_PLAYER_ID)
+					if (Players[i].connected)
+						if (Players[i].connected != CONNECT_END_MENU && Players[i].connected != CONNECT_DIED_IN_MINE)
+							km->playing = 1;
 			
 			// ... and let the reactor blow sky high!
 			if (!km->playing)
@@ -370,8 +367,12 @@ int kmatrix_handler(window *wind, d_event *event, kmatrix_screen *km)
 						return 0;
 					}
 				}
-				
-				window_close(wind);
+
+				// numobservers is not reset here: observers keep their slots across maps, and zeroing
+				// the count hid them from the HUD list while they were still in the game
+
+				if (window_exists(wind))
+					window_close(wind);
 				break;
 			}
 
@@ -413,7 +414,7 @@ void kmatrix_view(int network)
 	}
 	gr_palette_load(gr_palette);
 	strcpy(last_palette_loaded,"");		//force palette load next time
-
+	
 	km->network = network;
 	km->end_time = -1;
 	km->playing = 0;

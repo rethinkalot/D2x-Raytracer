@@ -34,4 +34,4 @@ From `C:/Games/D2Rs`:
 
 This configures the `directx12-win-release` preset and builds incrementally into `out/build/directx12-win-release`. On success it closes any running `descent2.exe`, copies the game to the testbench `C:/Games/D2xRT`, and prints "Confirm Complete". The same command is the "Build D2x-Raytracer" task in `C:/Games/D2Rs/.vscode/tasks.json`.
 
-The global F5 keybind is the MinGW D1s/D2s build. Don't press it in a terminal at `C:/Games/D2Rs`.
+RETHINK's VS Code **F4** keybind (terminal focus, Git Bash) runs `cd /c/Games/D2Rs && cmd //c build.bat`. F5 and F7 are the MinGW D1s/D2s builds and must not be pressed for D2Rs.

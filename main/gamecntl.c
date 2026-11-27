@@ -49,6 +49,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "3d.h"
 #include "effects.h"
 #include "gameseg.h"
+#include "fvi.h"
 #include "wall.h"
 #include "ai.h"
 #include "rbaudio.h"
@@ -101,7 +102,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "shieldfx.h"
 #endif
 
-#include <SDL/SDL.h>
+#include <SDL.h>
 
 extern void object_goto_prev_viewer(void);
 
@@ -145,15 +146,15 @@ extern void DropMarker();
 extern void DropSecondaryWeapon();
 extern void DropCurrentWeapon();
 
-int FinalCheats(int key);
+int FinalCheats(unsigned char ch);
 
 #ifndef RELEASE
-void do_cheat_menu(void);
+//void do_cheat_menu(void);
 #endif
 
 int HandleGameKey(int key);
 int HandleSystemKey(int key);
-int HandleTestKey(int key);
+//int HandleTestKey(int key);
 void advance_sound(void);
 void play_test_sound(void);
 
@@ -186,6 +187,7 @@ void transfer_energy_to_shield()
 
 	Players[Player_num].energy  -= e;
 	Players[Player_num].shields += e/CONVERTER_SCALE;
+	multi_send_ship_status(); // observers' energy bar
 	shieldfx_local_converting(); // energy pulses on the shield bubble
 
 	if (last_play_time > GameTime64)
@@ -259,7 +261,7 @@ void do_weapon_n_item_stuff()
 	}
 
 	if (allowed_to_fire_missile() && Controls.fire_secondary_state)
-		Global_missile_firing_count += Weapon_info[Secondary_weapon_to_weapon_info[Secondary_weapon]].fire_count;
+		Global_missile_firing_count += Weapon_info[Secondary_weapon_to_weapon_info[Players[Player_num].secondary_weapon]].fire_count;
 
 	if (Global_missile_firing_count) {
 		do_missile_firing(0);
@@ -357,6 +359,8 @@ int pause_handler(window *wind, d_event *event, char *msg)
 	{
 		case EVENT_WINDOW_ACTIVATED:
 			game_flush_inputs();
+			speedrun_set_gameplay(0);
+			speedrun_pause_menu_set(1);
 			break;
 
 		case EVENT_KEY_COMMAND:
@@ -386,7 +390,7 @@ int pause_handler(window *wind, d_event *event, char *msg)
 			break;
 
 		case EVENT_IDLE:
-			timer_delay2(50);
+			menu_frame_delay();
 			break;
 
 		case EVENT_WINDOW_DRAW:
@@ -394,6 +398,7 @@ int pause_handler(window *wind, d_event *event, char *msg)
 			break;
 
 		case EVENT_WINDOW_CLOSE:
+			speedrun_pause_menu_set(0);
 			songs_resume();
 			d_free(msg);
 			break;
@@ -495,6 +500,20 @@ int HandleDeathInput(d_event *event)
 	return 0;
 }
 
+// Alt+F7: Standard HUD -> Alternative #1 -> Alternative #2 -> No HUD (gameplay and demo playback)
+static void cycle_hud_mode(void)
+{
+	PlayerCfg.HudMode=(PlayerCfg.HudMode+1)%GAUGE_HUD_NUMMODES;
+	write_player_file();
+	switch (PlayerCfg.HudMode)
+	{
+		case 0: HUD_init_message_literal(HM_DEFAULT, "Standard HUD"); break;
+		case 1: HUD_init_message_literal(HM_DEFAULT, "Alternative HUD #1"); break;
+		case 2: HUD_init_message_literal(HM_DEFAULT, "Alternative HUD #2"); break;
+		case 3: HUD_init_message_literal(HM_DEFAULT, "No HUD"); break;
+	}
+}
+
 int HandleDemoKey(int key)
 {
 	switch (key) {
@@ -503,10 +522,10 @@ int HandleDemoKey(int key)
 		KEY_MAC(case KEY_COMMAND+KEY_2:)
 		case KEY_F2:	do_options_menu();	break;
 		KEY_MAC(case KEY_COMMAND+KEY_3:)
-		case KEY_F3:
-			 if (Viewer->type == OBJ_PLAYER)
-				toggle_cockpit();
-			 break;
+		case KEY_F3:	toggle_cockpit();	break;
+		case KEY_ALTED+KEY_F7:
+		KEY_MAC(case KEY_COMMAND+KEY_ALTED+KEY_7:)
+			cycle_hud_mode();	break;
 		KEY_MAC(case KEY_COMMAND+KEY_4:)
 		case KEY_F4:	Newdemo_show_percentage = !Newdemo_show_percentage; break;
 
@@ -528,7 +547,11 @@ int HandleDemoKey(int key)
 				else
 					break;
 			}
-			newdemo_stop_playback();
+			{
+				int choice = nm_messagebox( NULL, 2, TXT_YES, TXT_NO, "Exit Demo Playback?" );
+				if (choice == 0)
+					newdemo_stop_playback();
+			}
 			break;
 		case KEY_UP:
 			Newdemo_vcr_state = ND_STATE_PLAYBACK;
@@ -787,12 +810,25 @@ int HandleSystemKey(int key)
 			{
 				int choice;
 				int allow_loadsave = !(Game_mode & GM_MULTI) || (Game_mode & GM_MULTI_COOP);
-				choice = allow_loadsave ?
-					nm_messagebox(NULL, 4, "Abort Game", TXT_OPTIONS_, "Save Game...", TXT_LOAD_GAME, "Game Menu") :
-					nm_messagebox(NULL, 2, "Abort Game", TXT_OPTIONS_, "Game Menu");
+				// The host of a multiplayer game also gets "Change Map" (pick a mission and level)
+				int allow_change_map = (Game_mode & GM_MULTI) && multi_i_am_master() && !Endlevel_sequence;
+				if (allow_change_map)
+					choice = allow_loadsave ?
+						nm_messagebox(NULL, 5, "Abort Game", TXT_OPTIONS_, "Save Game...", TXT_LOAD_GAME, "Change Map", "Game Menu") :
+						nm_messagebox(NULL, 3, "Abort Game", TXT_OPTIONS_, "Change Map", "Game Menu");
+				else
+					choice = allow_loadsave ?
+						nm_messagebox(NULL, 4, "Abort Game", TXT_OPTIONS_, "Save Game...", TXT_LOAD_GAME, "Game Menu") :
+						nm_messagebox(NULL, 2, "Abort Game", TXT_OPTIONS_, "Game Menu");
+				if (allow_change_map && choice == (allow_loadsave ? 4 : 2))
+				{
+					multi_change_map_start();
+					return 1;
+				}
 				switch(choice)
 				{
 					case 0: // Abort Game
+					speedrun_quit_to_menu();
 						window_close(Game_wind);
 						break;
 					case 1: // Options
@@ -894,7 +930,9 @@ int HandleSystemKey(int key)
 		KEY_MAC(case KEY_COMMAND+KEY_3:)
 
 		case KEY_F3:
-			if (!Player_is_dead && Viewer->type==OBJ_PLAYER) //if (!(Guided_missile[Player_num] && Guided_missile[Player_num]->type==OBJ_WEAPON && Guided_missile[Player_num]->id==GUIDEDMISS_ID && Guided_missile[Player_num]->signature==Guided_missile_sig[Player_num] && PlayerCfg.GuidedInBigWindow))
+			if ((!Player_is_dead && Viewer->type==OBJ_PLAYER) ||
+				// Alternatively, we can also toggle the cockpit while observing in first-person mode.
+				(is_observer() && can_draw_observer_cockpit()))
 			{
 #ifdef RT_DX12
 				if (g_rt_free_cam_info.g_free_cam_enabled)
@@ -907,9 +945,9 @@ int HandleSystemKey(int key)
 		KEY_MAC(case KEY_COMMAND+KEY_5:)
 		case KEY_F5:
 			if ( Newdemo_state == ND_STATE_RECORDING )
-				newdemo_stop_recording();
+				newdemo_stop_recording(1);
 			else if ( Newdemo_state == ND_STATE_NORMAL )
-				newdemo_start_recording();
+				newdemo_start_recording(0);
 			break;
 #ifdef NETWORK
 		KEY_MAC(case KEY_COMMAND+KEY_ALTED+KEY_4:)
@@ -1047,6 +1085,76 @@ int HandleSystemKey(int key)
 
 extern void DropFlag();
 
+static void cycle_observed_player(int direction, int allow_free_observer)
+{
+	int new_obs = Current_obs_player;
+	int i;
+
+	for (i = 0; i < MAX_PLAYERS; i++)
+	{
+		new_obs = (MAX_PLAYERS + new_obs + direction) % MAX_PLAYERS;
+		if (new_obs == OBSERVER_PLAYER_ID)
+		{
+			if (allow_free_observer) {
+				reset_obs();
+				return;
+			}
+			continue;
+		}
+		if (Players[new_obs].connected == CONNECT_PLAYING &&
+			(allow_free_observer || !(Netgame.host_is_obs && new_obs == 0)))
+		{
+			set_obs(new_obs);
+			return;
+		}
+	}
+
+	if (allow_free_observer)
+		reset_obs();
+}
+
+static int handle_observer_control_event(d_event *event)
+{
+	int action = kconfig_observer_action(event);
+
+	if (!action || !is_observer())
+		return 0;
+
+	if (action == OBSERVER_CONTROL_TOGGLE_MODE)
+	{
+		// Cycle camera, as in D1s: first person -> third person -> free -> first person
+		if (is_observing_player())
+		{
+			if (Obs_at_distance == 0)
+			{
+				HUD_init_message_literal(HM_MULTI, "Observing third person.");
+				Obs_at_distance = 1;
+				last_drawn_cockpit = -1;
+				init_cockpit();
+			}
+			else
+			{
+				reset_obs();
+			}
+		}
+		else
+		{
+			cycle_observed_player(1, 0);
+			HUD_init_message_literal(HM_MULTI, "Observing first person.");
+			Obs_at_distance = 0;
+			last_drawn_cockpit = -1;
+			init_cockpit();
+		}
+		return 1;
+	}
+
+	if (!is_observing_player())
+		return 0;
+
+	cycle_observed_player(action == OBSERVER_CONTROL_PREVIOUS_PLAYER ? -1 : 1, 0);
+	return 1;
+}
+
 int HandleGameKey(int key)
 {
 	switch (key) {
@@ -1075,15 +1183,7 @@ int HandleGameKey(int key)
 
 		case KEY_ALTED+KEY_F7:
 		KEY_MAC(case KEY_COMMAND+KEY_ALTED+KEY_7:)
-			PlayerCfg.HudMode=(PlayerCfg.HudMode+1)%GAUGE_HUD_NUMMODES;
-			write_player_file();
-			switch (PlayerCfg.HudMode)
-			{
-				case 0: HUD_init_message_literal(HM_DEFAULT, "Standard HUD"); break;
-				case 1: HUD_init_message_literal(HM_DEFAULT, "Alternative HUD #1"); break;
-				case 2: HUD_init_message_literal(HM_DEFAULT, "Alternative HUD #2"); break;
-				case 3: HUD_init_message_literal(HM_DEFAULT, "No HUD"); break;
-			}
+			cycle_hud_mode();
 			return 1;
 
 #ifdef NETWORK
@@ -1113,6 +1213,44 @@ int HandleGameKey(int key)
 					HUD_init_message_literal(HM_MULTI, "Player accepted!");
 					RefuseTeam=2;
 					game_flush_inputs();
+				}
+			return 1;
+		case KEY_CTRLED + KEY_1:
+		case KEY_CTRLED + KEY_2:
+		case KEY_CTRLED + KEY_3:
+		case KEY_CTRLED + KEY_4:
+		case KEY_CTRLED + KEY_5:
+		case KEY_CTRLED + KEY_6:
+		case KEY_CTRLED + KEY_7:
+			if (is_observer())
+				set_obs(key - KEY_CTRLED - KEY_1);
+			return 1;
+		case KEY_CTRLED + KEY_8:
+			if (is_observer())
+				reset_obs();
+			return 1;
+		case KEY_CTRLED + KEY_9:
+			if (is_observer())
+				cycle_observed_player(-1, 1);
+			return 1;
+		case KEY_CTRLED + KEY_0:
+			if (is_observer())
+				cycle_observed_player(1, 1);
+			return 1;
+		case KEY_CTRLED + KEY_MINUS:
+			if (is_observer())
+				if (Obs_at_distance && is_observing_player()) {
+					HUD_init_message_literal(HM_MULTI, "Observing first person.");
+					Obs_at_distance = 0;
+					init_cockpit();
+				}
+			return 1;
+		case KEY_CTRLED + KEY_EQUAL:
+			if (is_observer())
+				if (!Obs_at_distance && is_observing_player()) {
+					HUD_init_message_literal(HM_MULTI, "Observing third person.");
+					Obs_at_distance = 1;
+					init_cockpit();
 				}
 			return 1;
 #endif
@@ -1314,207 +1452,207 @@ void kill_buddy(void)
 			}
 }
 
-int HandleTestKey(int key)
-{
-	switch (key)
-	{
-
-#ifdef SHOW_EXIT_PATH
-		case KEY_DEBUGGED+KEY_1:	create_special_path();	break;
-#endif
-
-		case KEY_DEBUGGED+KEY_Y:
-			do_controlcen_destroyed_stuff(NULL);
-			break;
-
-#ifdef NETWORK
-	case KEY_DEBUGGED+KEY_ALTED+KEY_D:
-			PlayerCfg.NetlifeKills=4000; PlayerCfg.NetlifeKilled=5;
-			multi_add_lifetime_kills();
-			break;
-#endif
-
-		case KEY_BACKSP:
-		case KEY_CTRLED+KEY_BACKSP:
-		case KEY_ALTED+KEY_BACKSP:
-		case KEY_SHIFTED+KEY_BACKSP:
-		case KEY_SHIFTED+KEY_ALTED+KEY_BACKSP:
-		case KEY_CTRLED+KEY_ALTED+KEY_BACKSP:
-		case KEY_SHIFTED+KEY_CTRLED+KEY_BACKSP:
-		case KEY_SHIFTED+KEY_CTRLED+KEY_ALTED+KEY_BACKSP:
-
-			Int3(); break;
-
-		case KEY_DEBUGGED+KEY_S:				digi_reset(); break;
-
-		case KEY_DEBUGGED+KEY_P:
-			if (Game_suspended & SUSP_ROBOTS)
-				Game_suspended &= ~SUSP_ROBOTS;		//robots move
-			else
-				Game_suspended |= SUSP_ROBOTS;		//robots don't move
-			break;
-
-
-
-		case KEY_DEBUGGED+KEY_K:	Players[Player_num].shields = 1;	break;							//	a virtual kill
-		case KEY_DEBUGGED+KEY_SHIFTED + KEY_K:  Players[Player_num].shields = -1;	 break;  //	an actual kill
-		case KEY_DEBUGGED+KEY_X: Players[Player_num].lives++; break; // Extra life cheat key.
-		case KEY_DEBUGGED+KEY_H:
-			if (Player_is_dead)
-				return 0;
-
-			Players[Player_num].flags ^= PLAYER_FLAGS_CLOAKED;
-			if (Players[Player_num].flags & PLAYER_FLAGS_CLOAKED) {
-#ifdef NETWORK
-				if (Game_mode & GM_MULTI)
-					multi_send_cloak();
-#endif
-				ai_do_cloak_stuff();
-				Players[Player_num].cloak_time = GameTime64;
-			}
-			break;
-
-
-		case KEY_DEBUGGED+KEY_R:
-			cheats.robotfiringsuspended = !cheats.robotfiringsuspended;
-			break;
-
-		case KEY_DEBUGGED+KEY_R+KEY_SHIFTED:
-			kill_all_robots();
-			break;
-
-#ifdef EDITOR		//editor-specific functions
-
-		case KEY_E + KEY_DEBUGGED:
-			window_set_visible(Game_wind, 0);	// don't let the game do anything while we set the editor up
-			init_editor();
-			window_close(Game_wind);
-			break;
-	case KEY_Q + KEY_SHIFTED + KEY_DEBUGGED:
-		{
-			char pal_save[768];
-			memcpy(pal_save,gr_palette,768);
-			init_subtitles("end.tex");	//ingore errors
-			PlayMovie ("end.mve",MOVIE_ABORT_ON);
-			close_subtitles();
-			Screen_mode = -1;
-			set_screen_mode(SCREEN_GAME);
-			reset_cockpit();
-			memcpy(gr_palette,pal_save,768);
-			gr_palette_load(gr_palette);
-			break;
-		}
-		case KEY_C + KEY_SHIFTED + KEY_DEBUGGED:
-			if (!Player_is_dead && !( Game_mode & GM_MULTI ))
-				move_player_2_segment(Cursegp,Curside);
-			break;   //move eye to curseg
-
-
-		case KEY_DEBUGGED+KEY_W:	draw_world_from_game(); break;
-
-		#endif  //#ifdef EDITOR
-
-		case KEY_DEBUGGED+KEY_LAPOSTRO: Show_view_text_timer = 0x30000; object_goto_next_viewer(); break;
-		case KEY_DEBUGGED+KEY_SHIFTED+KEY_LAPOSTRO: Viewer=ConsoleObject; break;
-		case KEY_DEBUGGED+KEY_O: toggle_outline_mode(); break;
-		case KEY_DEBUGGED+KEY_T:
-			*Toggle_var = !*Toggle_var;
-			if (*Toggle_var)
-				GameArg.SysMaxFPS = 300;
-			else
-				GameArg.SysMaxFPS = 30;
-			break;
-		case KEY_DEBUGGED + KEY_L:
-			if (++Lighting_on >= 2) Lighting_on = 0; break;
-		case KEY_DEBUGGED + KEY_SHIFTED + KEY_L:
-			Beam_brightness=0x38000-Beam_brightness; break;
-		case KEY_PAD5: slew_stop(); break;
-
-#ifndef NDEBUG
-		case KEY_DEBUGGED + KEY_F11: play_test_sound(); break;
-		case KEY_DEBUGGED + KEY_SHIFTED+KEY_F11: advance_sound(); play_test_sound(); break;
-#endif
-
-		case KEY_DEBUGGED + KEY_M:
-			Debug_spew = !Debug_spew;
-			if (Debug_spew) {
-				HUD_init_message_literal(HM_DEFAULT,  "Debug Spew: ON" );
-			} else {
-				HUD_init_message_literal(HM_DEFAULT,  "Debug Spew: OFF" );
-			}
-			break;
-
-		case KEY_DEBUGGED + KEY_C:
-			do_cheat_menu();
-			break;
-		case KEY_DEBUGGED + KEY_SHIFTED + KEY_A:
-			do_megawow_powerup(10);
-			break;
-		case KEY_DEBUGGED + KEY_A:	{
-			do_megawow_powerup(200);
-				break;
-		}
-
-		case KEY_DEBUGGED+KEY_SPACEBAR:		//KEY_F7:				// Toggle physics flying
-			slew_stop();
-			game_flush_inputs();
-			if ( ConsoleObject->control_type != CT_FLYING ) {
-				fly_init(ConsoleObject);
-				Game_suspended &= ~SUSP_ROBOTS;	//robots move
-			} else {
-				slew_init(ConsoleObject);			//start player slewing
-				Game_suspended |= SUSP_ROBOTS;	//robots don't move
-			}
-			break;
-
-		case KEY_DEBUGGED+KEY_COMMA: Render_zoom = fixmul(Render_zoom,62259); break;
-		case KEY_DEBUGGED+KEY_PERIOD: Render_zoom = fixmul(Render_zoom,68985); break;
-
-		#ifndef NDEBUG
-		case KEY_DEBUGGED+KEY_D:
-			if ((GameArg.DbgUseDoubleBuffer = !GameArg.DbgUseDoubleBuffer)!=0)
-				init_cockpit();
-			break;
-		#endif
-
-#ifdef EDITOR
-		case KEY_DEBUGGED+KEY_Q:
-			stop_time();
-			dump_used_textures_all();
-			start_time();
-			break;
-#endif
-
-		case KEY_DEBUGGED+KEY_B: {
-			newmenu_item m;
-			char text[FILENAME_LEN]="";
-			int item;
-			m.type=NM_TYPE_INPUT; m.text_len = FILENAME_LEN; m.text = text;
-			item = newmenu_do( NULL, "Briefing to play?", 1, &m, NULL, NULL );
-			if (item != -1) {
-				do_briefing_screens(text,1);
-			}
-			break;
-		}
-
-		case KEY_DEBUGGED+KEY_SHIFTED+KEY_B:
-		case KEY_DEBUGGED+KEY_SHIFTED+KEY_N:
-			if (Player_is_dead)
-				return 0;
-
-			kill_and_so_forth(key==KEY_DEBUGGED+KEY_SHIFTED+KEY_N);
-			break;
-		case KEY_DEBUGGED+KEY_G:
-			GameTime64 = (0x7fffffffffffffffLL) - (F1_0*10);
-			HUD_init_message(HM_DEFAULT, "GameTime %li - Reset in 10 seconds!", GameTime64);
-			break;
-		default:
-			return 0;
-			break;
-	}
-
-	return 1;
-}
+// Debug test keys (Delete+key) -- disabled, as in D1
+//int HandleTestKey(int key)
+//{
+//	switch (key)
+//	{
+//
+//#ifdef SHOW_EXIT_PATH
+//		case KEY_DEBUGGED+KEY_1:	create_special_path();	break;
+//#endif
+//
+//		case KEY_DEBUGGED+KEY_Y:
+//			do_controlcen_destroyed_stuff(NULL);
+//			break;
+//
+//#ifdef NETWORK
+//	case KEY_DEBUGGED+KEY_ALTED+KEY_D:
+//			PlayerCfg.NetlifeKills=4000; PlayerCfg.NetlifeKilled=5;
+//			multi_add_lifetime_kills();
+//			break;
+//#endif
+//
+//		case KEY_BACKSP:
+//		case KEY_CTRLED+KEY_BACKSP:
+//		case KEY_ALTED+KEY_BACKSP:
+//		case KEY_SHIFTED+KEY_BACKSP:
+//		case KEY_SHIFTED+KEY_ALTED+KEY_BACKSP:
+//		case KEY_CTRLED+KEY_ALTED+KEY_BACKSP:
+//		case KEY_SHIFTED+KEY_CTRLED+KEY_BACKSP:
+//		case KEY_SHIFTED+KEY_CTRLED+KEY_ALTED+KEY_BACKSP:
+//
+//			Int3(); break;
+//
+//		case KEY_DEBUGGED+KEY_S:				digi_reset(); break;
+//
+//		case KEY_DEBUGGED+KEY_P:
+//			if (Game_suspended & SUSP_ROBOTS)
+//				Game_suspended &= ~SUSP_ROBOTS;		//robots move
+//			else
+//				Game_suspended |= SUSP_ROBOTS;		//robots don't move
+//			break;
+//
+//
+//
+//		case KEY_DEBUGGED+KEY_K:	Players[Player_num].shields = 1;	break;							//	a virtual kill
+//		case KEY_DEBUGGED+KEY_SHIFTED + KEY_K:  Players[Player_num].shields = -1;	 break;  //	an actual kill
+//		case KEY_DEBUGGED+KEY_X: Players[Player_num].lives++; break; // Extra life cheat key.
+//		case KEY_DEBUGGED+KEY_H:
+//			if (Player_is_dead)
+//				return 0;
+//
+//			Players[Player_num].flags ^= PLAYER_FLAGS_CLOAKED;
+//			if (Players[Player_num].flags & PLAYER_FLAGS_CLOAKED) {
+//#ifdef NETWORK
+//				if (Game_mode & GM_MULTI)
+//					multi_send_cloak();
+//#endif
+//				ai_do_cloak_stuff();
+//				Players[Player_num].cloak_time = GameTime64;
+//			}
+//			break;
+//
+//
+//		case KEY_DEBUGGED+KEY_R:
+//			cheats.robotfiringsuspended = !cheats.robotfiringsuspended;
+//			break;
+//
+//		case KEY_DEBUGGED+KEY_R+KEY_SHIFTED:
+//			kill_all_robots();
+//			break;
+//
+//#ifdef EDITOR		//editor-specific functions
+//
+//		case KEY_E + KEY_DEBUGGED:
+//			window_set_visible(Game_wind, 0);	// don't let the game do anything while we set the editor up
+//			init_editor();
+//			window_close(Game_wind);
+//			break;
+//	case KEY_Q + KEY_SHIFTED + KEY_DEBUGGED:
+//		{
+//			char pal_save[768];
+//			memcpy(pal_save,gr_palette,768);
+//			init_subtitles("end.tex");	//ingore errors
+//			PlayMovie ("end.mve",MOVIE_ABORT_ON);
+//			close_subtitles();
+//			Screen_mode = -1;
+//			set_screen_mode(SCREEN_GAME);
+//			reset_cockpit();
+//			memcpy(gr_palette,pal_save,768);
+//			gr_palette_load(gr_palette);
+//			break;
+//		}
+//		case KEY_C + KEY_SHIFTED + KEY_DEBUGGED:
+//			if (!Player_is_dead && !( Game_mode & GM_MULTI ))
+//				move_player_2_segment(Cursegp,Curside);
+//			break;   //move eye to curseg
+//
+//
+//		case KEY_DEBUGGED+KEY_W:	draw_world_from_game(); break;
+//
+//		#endif  //#ifdef EDITOR
+//
+//		case KEY_DEBUGGED+KEY_LAPOSTRO: Show_view_text_timer = 0x30000; object_goto_next_viewer(); break;
+//		case KEY_DEBUGGED+KEY_SHIFTED+KEY_LAPOSTRO: Viewer=ConsoleObject; break;
+//		case KEY_DEBUGGED+KEY_O: toggle_outline_mode(); break;
+//		case KEY_DEBUGGED+KEY_T:
+//			*Toggle_var = !*Toggle_var;
+//			if (*Toggle_var)
+//				GameArg.SysMaxFPS = 300;
+//			else
+//				GameArg.SysMaxFPS = 30;
+//			break;
+//		case KEY_DEBUGGED + KEY_L:
+//			if (++Lighting_on >= 2) Lighting_on = 0; break;
+//		case KEY_DEBUGGED + KEY_SHIFTED + KEY_L:
+//			Beam_brightness=0x38000-Beam_brightness; break;
+//		case KEY_PAD5: slew_stop(); break;
+//
+//#ifndef NDEBUG
+//		case KEY_DEBUGGED + KEY_F11: play_test_sound(); break;
+//		case KEY_DEBUGGED + KEY_SHIFTED+KEY_F11: advance_sound(); play_test_sound(); break;
+//#endif
+//
+//		case KEY_DEBUGGED + KEY_M:
+//			Debug_spew = !Debug_spew;
+//			if (Debug_spew) {
+//				HUD_init_message_literal(HM_DEFAULT,  "Debug Spew: ON" );
+//			} else {
+//				HUD_init_message_literal(HM_DEFAULT,  "Debug Spew: OFF" );
+//			}
+//			break;
+//
+//		case KEY_DEBUGGED + KEY_C:
+//			do_cheat_menu();
+//			break;
+//		case KEY_DEBUGGED + KEY_SHIFTED + KEY_A:
+//			do_megawow_powerup(10);
+//			break;
+//		case KEY_DEBUGGED + KEY_A:	{
+//			do_megawow_powerup(200);
+//				break;
+//		}
+//
+//		case KEY_DEBUGGED+KEY_SPACEBAR:		//KEY_F7:				// Toggle physics flying
+//			slew_stop();
+//			game_flush_inputs();
+//			if ( ConsoleObject->control_type != CT_FLYING ) {
+//				fly_init(ConsoleObject);
+//				Game_suspended &= ~SUSP_ROBOTS;	//robots move
+//			} else {
+//				slew_init(ConsoleObject);			//start player slewing
+//				Game_suspended |= SUSP_ROBOTS;	//robots don't move
+//			}
+//			break;
+//
+//		case KEY_DEBUGGED+KEY_COMMA: Render_zoom = fixmul(Render_zoom,62259); break;
+//		case KEY_DEBUGGED+KEY_PERIOD: Render_zoom = fixmul(Render_zoom,68985); break;
+//
+//		#ifndef NDEBUG
+//		case KEY_DEBUGGED+KEY_D:
+//			if ((GameArg.DbgUseDoubleBuffer = !GameArg.DbgUseDoubleBuffer)!=0)
+//				init_cockpit();
+//			break;
+//		#endif
+//
+//#ifdef EDITOR
+//		case KEY_DEBUGGED+KEY_Q:
+//			stop_time();
+//			dump_used_textures_all();
+//			start_time();
+//			break;
+//#endif
+//
+//		case KEY_DEBUGGED+KEY_B: {
+//			newmenu_item m;
+//			char text[FILENAME_LEN]="";
+//			int item;
+//			m.type=NM_TYPE_INPUT; m.text_len = FILENAME_LEN; m.text = text;
+//			item = newmenu_do( NULL, "Briefing to play?", 1, &m, NULL, NULL );
+//			if (item != -1) {
+//				do_briefing_screens(text,1);
+//			}
+//			break;
+//		}
+//
+//		case KEY_DEBUGGED+KEY_SHIFTED+KEY_B:
+//			if (Player_is_dead)
+//				return 0;
+//
+//			kill_and_so_forth();
+//			break;
+//		case KEY_DEBUGGED+KEY_G:
+//			GameTime64 = (0x7fffffffffffffffLL) - (F1_0*10);
+//			HUD_init_message(HM_DEFAULT, "GameTime %li - Reset in 10 seconds!", GameTime64);
+//			break;
+//		default:
+//			return 0;
+//			break;
+//	}
+//
+//	return 1;
+//}
 #endif		//#ifndef RELEASE
 
 //	Cheat functions ------------------------------------------------------------
@@ -1526,7 +1664,7 @@ char AcidCheatOn=0;
 char old_IntMethod;
 
 #define CHEAT_MAX_LEN 15
-#define NUM_CHEATS    28
+#define NUM_CHEATS    21
 
 typedef struct cheat_code
 {
@@ -1535,14 +1673,7 @@ typedef struct cheat_code
 } __pack__ cheat_code;
 
 cheat_code cheat_codes[NUM_CHEATS] = {
-	{ "gabbagabbahey", &cheats.lamer },
-	{ "motherlode", &cheats.lamer },
-	{ "currygoat", &cheats.lamer },
-	{ "zingermans", &cheats.lamer },
-	{ "eatangelos", &cheats.lamer },
-	{ "ericaanne", &cheats.lamer },
-	{ "joshuaakira", &cheats.lamer },
-	{ "whammazoom", &cheats.lamer },
+	{ "gabbagabbahey", &cheats.lamer }, // slot 0 filler: a match here is treated as no match
 	{ "honestbob", &cheats.wowie },
 	{ "algroove", &cheats.allkeys },
 	{ "alifalafel", &cheats.accessory },
@@ -1565,7 +1696,26 @@ cheat_code cheat_codes[NUM_CHEATS] = {
 	{ "bittersweet", &cheats.acid },
 };
 
-int FinalCheats(int key)
+// Typing "frametime" toggles the FPS counter (the Graphics menu "FPS Counter" option). Not a cheat: no cheat
+// flag, score kept, and it works in single player, multiplayer and demo playback.
+static int frametime_code(unsigned char ch)
+{
+	static const char code[] = "frametime";
+	enum { len = sizeof(code) - 1 };
+	static char buf[len];
+
+	memmove(buf, buf + 1, len - 1);
+	buf[len - 1] = ch;
+	if (d_strnicmp(buf, code, len) != 0)
+		return 0;
+
+	memset(buf, 0, len);
+	GameCfg.FPSIndicator = !GameCfg.FPSIndicator;
+	HUD_init_message(HM_DEFAULT, "FPS Counter %s", GameCfg.FPSIndicator ? TXT_ON : TXT_OFF);
+	return 1;
+}
+
+int FinalCheats(unsigned char ch)
 {
 	static char cheat_buffer[CHEAT_MAX_LEN] = "AAAAAAAAAAAAAAA";
 	int i = 0, gotcha = 0;
@@ -1575,7 +1725,7 @@ int FinalCheats(int key)
 
 	for (i = 1; i < CHEAT_MAX_LEN; i++)
 		cheat_buffer[i-1] = cheat_buffer[i];
-	cheat_buffer[CHEAT_MAX_LEN-1] = key_ascii();
+	cheat_buffer[CHEAT_MAX_LEN-1] = ch;
 	for (i = 0; i < NUM_CHEATS; i++)
 	{
 		int cheatlen = strlen(cheat_codes[i].string);
@@ -1593,12 +1743,6 @@ int FinalCheats(int key)
 	
 	if (!gotcha)
 		return 0;
-
-	if (cheat_codes[gotcha].stateptr == &cheats.lamer)
-	{
-		Players[Player_num].shields=Players[Player_num].energy=i2f(1);
-		HUD_init_message_literal(HM_DEFAULT, "Take that...cheater!");
-	}
 
 	if (cheat_codes[gotcha].stateptr == &cheats.wowie)
 	{
@@ -1767,65 +1911,65 @@ int FinalCheats(int key)
 }
 
 
-// Internal Cheat Menu
+// Internal Cheat Menu (Delete+C) -- disabled, as in D1
 #ifndef RELEASE
-void do_cheat_menu()
-{
-	int mmn;
-	newmenu_item mm[16];
-	char score_text[21];
-
-	sprintf( score_text, "%d", Players[Player_num].score );
-
-	mm[0].type=NM_TYPE_CHECK; mm[0].value=Players[Player_num].flags & PLAYER_FLAGS_INVULNERABLE; mm[0].text="Invulnerability";
-	mm[1].type=NM_TYPE_CHECK; mm[1].value=Players[Player_num].flags & PLAYER_FLAGS_CLOAKED; mm[1].text="Cloaked";
-	mm[2].type=NM_TYPE_CHECK; mm[2].value=0; mm[2].text="All keys";
-	mm[3].type=NM_TYPE_NUMBER; mm[3].value=f2i(Players[Player_num].energy); mm[3].text="% Energy"; mm[3].min_value=0; mm[3].max_value=200;
-	mm[4].type=NM_TYPE_NUMBER; mm[4].value=f2i(Players[Player_num].shields); mm[4].text="% Shields"; mm[4].min_value=0; mm[4].max_value=200;
-	mm[5].type=NM_TYPE_TEXT; mm[5].text = "Score:";
-	mm[6].type=NM_TYPE_INPUT; mm[6].text_len = 10; mm[6].text = score_text;
-	//mm[7].type=NM_TYPE_RADIO; mm[7].value=(Players[Player_num].laser_level==0); mm[7].group=0; mm[7].text="Laser level 1";
-	//mm[8].type=NM_TYPE_RADIO; mm[8].value=(Players[Player_num].laser_level==1); mm[8].group=0; mm[8].text="Laser level 2";
-	//mm[9].type=NM_TYPE_RADIO; mm[9].value=(Players[Player_num].laser_level==2); mm[9].group=0; mm[9].text="Laser level 3";
-	//mm[10].type=NM_TYPE_RADIO; mm[10].value=(Players[Player_num].laser_level==3); mm[10].group=0; mm[10].text="Laser level 4";
-
-	mm[7].type=NM_TYPE_NUMBER; mm[7].value=Players[Player_num].laser_level+1; mm[7].text="Laser Level"; mm[7].min_value=0; mm[7].max_value=MAX_SUPER_LASER_LEVEL+1;
-	mm[8].type=NM_TYPE_NUMBER; mm[8].value=Players[Player_num].secondary_ammo[CONCUSSION_INDEX]; mm[8].text="Missiles"; mm[8].min_value=0; mm[8].max_value=200;
-
-	mmn = newmenu_do("Wimp Menu",NULL,9, mm, NULL, NULL );
-
-	if (mmn > -1 )  {
-		if ( mm[0].value )  {
-			Players[Player_num].flags |= PLAYER_FLAGS_INVULNERABLE;
-			Players[Player_num].invulnerable_time = GameTime64+i2f(1000);
-		} else
-			Players[Player_num].flags &= ~PLAYER_FLAGS_INVULNERABLE;
-		if ( mm[1].value )
-		{
-			Players[Player_num].flags |= PLAYER_FLAGS_CLOAKED;
-			#ifdef NETWORK
-			if (Game_mode & GM_MULTI)
-				multi_send_cloak();
-			#endif
-			ai_do_cloak_stuff();
-			Players[Player_num].cloak_time = GameTime64;
-		}
-		else
-			Players[Player_num].flags &= ~PLAYER_FLAGS_CLOAKED;
-
-		if (mm[2].value) Players[Player_num].flags |= PLAYER_FLAGS_BLUE_KEY | PLAYER_FLAGS_RED_KEY | PLAYER_FLAGS_GOLD_KEY;
-		Players[Player_num].energy=i2f(mm[3].value);
-		Players[Player_num].shields=i2f(mm[4].value);
-		Players[Player_num].score = atoi(mm[6].text);
-		//if (mm[7].value) Players[Player_num].laser_level=0;
-		//if (mm[8].value) Players[Player_num].laser_level=1;
-		//if (mm[9].value) Players[Player_num].laser_level=2;
-		//if (mm[10].value) Players[Player_num].laser_level=3;
-		Players[Player_num].laser_level = mm[7].value-1;
-		Players[Player_num].secondary_ammo[CONCUSSION_INDEX] = mm[8].value;
-		init_gauges();
-	}
-}
+//void do_cheat_menu()
+//{
+//	int mmn;
+//	newmenu_item mm[16];
+//	char score_text[21];
+//
+//	sprintf( score_text, "%d", Players[Player_num].score );
+//
+//	mm[0].type=NM_TYPE_CHECK; mm[0].value=Players[Player_num].flags & PLAYER_FLAGS_INVULNERABLE; mm[0].text="Invulnerability";
+//	mm[1].type=NM_TYPE_CHECK; mm[1].value=Players[Player_num].flags & PLAYER_FLAGS_CLOAKED; mm[1].text="Cloaked";
+//	mm[2].type=NM_TYPE_CHECK; mm[2].value=0; mm[2].text="All keys";
+//	mm[3].type=NM_TYPE_NUMBER; mm[3].value=f2i(Players[Player_num].energy); mm[3].text="% Energy"; mm[3].min_value=0; mm[3].max_value=200;
+//	mm[4].type=NM_TYPE_NUMBER; mm[4].value=f2i(Players[Player_num].shields); mm[4].text="% Shields"; mm[4].min_value=0; mm[4].max_value=200;
+//	mm[5].type=NM_TYPE_TEXT; mm[5].text = "Score:";
+//	mm[6].type=NM_TYPE_INPUT; mm[6].text_len = 10; mm[6].text = score_text;
+//	//mm[7].type=NM_TYPE_RADIO; mm[7].value=(Players[Player_num].laser_level==0); mm[7].group=0; mm[7].text="Laser level 1";
+//	//mm[8].type=NM_TYPE_RADIO; mm[8].value=(Players[Player_num].laser_level==1); mm[8].group=0; mm[8].text="Laser level 2";
+//	//mm[9].type=NM_TYPE_RADIO; mm[9].value=(Players[Player_num].laser_level==2); mm[9].group=0; mm[9].text="Laser level 3";
+//	//mm[10].type=NM_TYPE_RADIO; mm[10].value=(Players[Player_num].laser_level==3); mm[10].group=0; mm[10].text="Laser level 4";
+//
+//	mm[7].type=NM_TYPE_NUMBER; mm[7].value=Players[Player_num].laser_level+1; mm[7].text="Laser Level"; mm[7].min_value=0; mm[7].max_value=MAX_SUPER_LASER_LEVEL+1;
+//	mm[8].type=NM_TYPE_NUMBER; mm[8].value=Players[Player_num].secondary_ammo[CONCUSSION_INDEX]; mm[8].text="Missiles"; mm[8].min_value=0; mm[8].max_value=200;
+//
+//	mmn = newmenu_do("Wimp Menu",NULL,9, mm, NULL, NULL );
+//
+//	if (mmn > -1 )  {
+//		if ( mm[0].value )  {
+//			Players[Player_num].flags |= PLAYER_FLAGS_INVULNERABLE;
+//			Players[Player_num].invulnerable_time = GameTime64+i2f(1000);
+//		} else
+//			Players[Player_num].flags &= ~PLAYER_FLAGS_INVULNERABLE;
+//		if ( mm[1].value )
+//		{
+//			Players[Player_num].flags |= PLAYER_FLAGS_CLOAKED;
+//			#ifdef NETWORK
+//			if (Game_mode & GM_MULTI)
+//				multi_send_cloak();
+//			#endif
+//			ai_do_cloak_stuff();
+//			Players[Player_num].cloak_time = GameTime64;
+//		}
+//		else
+//			Players[Player_num].flags &= ~PLAYER_FLAGS_CLOAKED;
+//
+//		if (mm[2].value) Players[Player_num].flags |= PLAYER_FLAGS_BLUE_KEY | PLAYER_FLAGS_RED_KEY | PLAYER_FLAGS_GOLD_KEY;
+//		Players[Player_num].energy=i2f(mm[3].value);
+//		Players[Player_num].shields=i2f(mm[4].value);
+//		Players[Player_num].score = atoi(mm[6].text);
+//		//if (mm[7].value) Players[Player_num].laser_level=0;
+//		//if (mm[8].value) Players[Player_num].laser_level=1;
+//		//if (mm[9].value) Players[Player_num].laser_level=2;
+//		//if (mm[10].value) Players[Player_num].laser_level=3;
+//		Players[Player_num].laser_level = mm[7].value-1;
+//		Players[Player_num].secondary_ammo[CONCUSSION_INDEX] = mm[8].value;
+//		init_gauges();
+//	}
+//}
 #endif
 
 
@@ -1859,6 +2003,129 @@ void play_test_sound()
 }
 
 #endif  //ifndef NDEBUG
+
+// Place the observer camera. Run once per frame, after the frame's network and object updates and just before
+// rendering, so the camera and the observed ship are both taken from the same final position.
+void observer_camera_update(void)
+{
+	if (is_observer() && Newdemo_state < ND_STATE_PLAYBACK) {
+		// Force the observer to a certain camera based on whether they are freely observing or observing a specific player.
+		if (is_observing_player()) {
+			// We're observing a player directly, and need to interpolate the position and orientation.  Check to see if the real position has updated, and accumulate Last_real_update time.
+			// Compare against the raw (un-offset) pose: in third person Real_pos carries the camera offset and would never match.
+			if (vm_vec_equal(&Real_raw_pos, &Objects[Players[Current_obs_player].objnum].pos) && vm_mat_equal(&Real_raw_orient, &Objects[Players[Current_obs_player].objnum].orient)) {
+				Last_real_update += FrameTime;
+			} else {
+
+				Real_raw_pos = Objects[Players[Current_obs_player].objnum].pos;
+				Real_raw_orient = Objects[Players[Current_obs_player].objnum].orient;
+				Real_pos = Real_raw_pos;
+				Real_orient = Real_raw_orient;
+				Last_real_update = 0;
+
+				// If we're observing at a distance, move the camera accordingly.
+				if (Obs_at_distance == 1) {
+					int dist = PlayerCfg.ObsIncreaseThirdPersonDist[get_observer_game_mode()] ? -30 : -20;
+					vms_vector move = ZERO_VECTOR;
+					vm_vec_copy_scale(&move, &Real_orient.fvec, F1_0 * dist);
+					Real_pos.x += move.x;
+					Real_pos.y += move.y;
+					Real_pos.z += move.z;
+
+					// Stop the camera at the first wall behind the ship, so it stays inside the mine.
+					object *obs_obj = &Objects[Players[Current_obs_player].objnum];
+					fvi_query fq;
+					fvi_info hit_data;
+					fq.p0 = &Real_raw_pos;
+					fq.p1 = &Real_pos;
+					fq.startseg = obs_obj->segnum;
+					fq.rad = F1_0;
+					fq.thisobjnum = obs_obj - Objects;
+					fq.ignore_obj_list = NULL;
+					fq.flags = FQ_TRANSWALL;
+					int hit_type = find_vector_intersection(&fq, &hit_data);
+					if (hit_type == HIT_WALL)
+						Real_pos = hit_data.hit_pnt;
+					else if (hit_type == HIT_BAD_P0)
+						Real_pos = Real_raw_pos;
+				}
+			}
+
+			// The observed ship is already interpolated every frame (multi_interp_update_remote), so the camera follows it
+			// rigidly. A lagging chase here made the ship and the camera move out of step (ghosting and jitter).
+			fix sample_time = 0;
+
+			if (sample_time <= Last_real_update) {
+				// We haven't updated the real position within the sample time, so just update position and orientation as normal.
+				ConsoleObject->pos = Real_pos;
+				ConsoleObject->orient = Real_orient;
+			} else {
+				// Determine how close we should get to the real position and orientation, and update the console object accordingly.
+				fix factor;
+				fix remaining = sample_time - Last_real_update;
+				if (remaining <= 0) {
+					factor = F1_0;
+				} else {
+					factor = fixdiv(FrameTime, remaining);
+					if (factor > F1_0) {
+						factor = F1_0;
+					}
+					if (factor < 0) {
+						factor = 0;
+					}
+				}
+
+				vms_vector  fvec1, fvec2, rvec1, rvec2;
+				fix         mag1;
+
+				// Update orientation.
+				fvec1 = ConsoleObject->orient.fvec;
+				vm_vec_scale(&fvec1, F1_0-factor);
+				fvec2 = Real_orient.fvec;
+				vm_vec_scale(&fvec2, factor);
+				vm_vec_add2(&fvec1, &fvec2);
+				mag1 = vm_vec_normalize_quick(&fvec1);
+				if (mag1 > F1_0/256) {
+					rvec1 = ConsoleObject->orient.rvec;
+					vm_vec_scale(&rvec1, F1_0-factor);
+					rvec2 = Real_orient.rvec;
+					vm_vec_scale(&rvec2, factor);
+					vm_vec_add2(&rvec1, &rvec2);
+					vm_vec_normalize_quick(&rvec1); // Note: Doesn't matter if this is null, if null, vm_vector_2_matrix will just use fvec1
+					vm_vector_2_matrix(&ConsoleObject->orient, &fvec1, NULL, &rvec1);
+				}
+
+				// Update position.
+				vms_vector vec_diff;
+				vm_vec_sub(&vec_diff, &Real_pos, &ConsoleObject->pos);
+				vm_vec_scale(&vec_diff, factor);
+
+				vm_vec_add2(&ConsoleObject->pos, &vec_diff);
+			}
+
+			// The camera moved, so its segment must follow or the view renders from the wrong place.
+			if (Obs_at_distance == 1)
+				update_object_seg(ConsoleObject);
+			else {
+				// First person: the camera sits on the ship, so it takes the ship's segment.
+				const int ship_seg = Objects[Players[Current_obs_player].objnum].segnum;
+
+				if (ship_seg >= 0 && ConsoleObject->segnum != ship_seg)
+					obj_relink(ConsoleObject - Objects, ship_seg);
+			}
+		} else {
+			// If we're freely observing, just update position and orientation as normal.
+			ConsoleObject->pos = Objects[Players[Current_obs_player].objnum].pos;
+			ConsoleObject->orient = Objects[Players[Current_obs_player].objnum].orient;
+			{
+				const int ship_seg = Objects[Players[Current_obs_player].objnum].segnum;
+
+				if (ship_seg >= 0 && ConsoleObject->segnum != ship_seg)
+					obj_relink(ConsoleObject - Objects, ship_seg);
+			}
+		}
+	}
+}
 
 int ReadControls(d_event *event)
 {
@@ -1923,24 +2190,31 @@ int ReadControls(d_event *event)
 		}
 		else if (Newdemo_state == ND_STATE_PLAYBACK )
 		{
+			if (frametime_code(key_ascii())) return 1;
 			if (HandleDemoKey(key))
 				return 1;
 		}
 		else
 		{
-			if (FinalCheats(key)) return 1;
+			unsigned char ch = key_ascii(); // read once: key_ascii() consumes the char, so a second read starved the cheat codes
+			if (frametime_code(ch)) return 1;
+			if (FinalCheats(ch)) return 1;
 			if (HandleSystemKey(key)) return 1;
 			if (HandleGameKey(key)) return 1;
+			if (is_observer() && handle_observer_control_event(event)) return 1;
 		}
 
 #ifndef RELEASE
-		if (HandleTestKey(key))
-			return 1;
+//		if (HandleTestKey(key))
+//			return 1;
 #endif
 
 		if (call_default_handler(event))
 			return 1;
 	}
+
+	if (event->type != EVENT_KEY_COMMAND && !Endlevel_sequence && Newdemo_state != ND_STATE_PLAYBACK && is_observer() && handle_observer_control_event(event))
+		return 1;
 
 	int should_read_controls;
 	if (!Endlevel_sequence && !Player_is_dead && (Newdemo_state != ND_STATE_PLAYBACK)) {
@@ -1970,7 +2244,7 @@ int ReadControls(d_event *event)
 			Controls.automap_count = 0;
 			if (!((Game_mode & GM_MULTI) && Control_center_destroyed && (Countdown_seconds_left < 10)))
 			{
-				do_automap(0);
+				do_automap();
 				return 1;
 			}
 		}
@@ -1985,4 +2259,3 @@ int ReadControls(d_event *event)
 
 	return 0;
 }
-

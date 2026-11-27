@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 #ifdef _MSC_VER
+#include <winsock2.h>
 #include <windows.h>
 #endif
 
@@ -28,7 +29,7 @@
 #endif
 
 #include <errno.h>
-#include <SDL/SDL.h>
+#include <SDL.h>
 #include "hudmsg.h"
 #include "game.h"
 #include "text.h"
@@ -51,6 +52,8 @@
 #include "config.h"
 #include "vers_id.h"
 #include "game.h"
+#include "pngfile.h"
+#include "oglprog.h"
 
 #if defined(__APPLE__) && defined(__MACH__)
 #include <OpenGL/glu.h>
@@ -106,11 +109,151 @@ bool TestEGLError(char* pszLocation)
 }
 #endif
 
+#ifndef OGLES
+// Fullscreen borderless: the window covers the whole monitor. The game still draws at the chosen
+// resolution, in the window's bottom-left corner, and just before each swap that picture is put in the
+// middle of the window, pixel for pixel, with black all around. 0 when the window is the game's own size.
+static int gr_fill_w, gr_fill_h;
+static GLuint gr_fill_tex;
+static int gr_fill_tex_w, gr_fill_tex_h;
+
+// Where the stretched game picture sits in the window, in window pixels from the top-left
+static void gr_fill_rect(int *x, int *y, int *w, int *h)
+{
+	int gw = grd_curscreen->sc_w, gh = grd_curscreen->sc_h;
+
+	if (gw <= gr_fill_w && gh <= gr_fill_h) // fits: pixel for pixel, in the middle
+	{
+		*w = gw;
+		*h = gh;
+	}
+	else if ((long)gr_fill_w * gh <= (long)gr_fill_h * gw) // bigger than the screen: shrunk to fit, keeping its shape
+	{
+		*w = gr_fill_w;
+		*h = (int)((long)gr_fill_w * gh / gw);
+	}
+	else // bigger than the screen, taller shape: shrunk to the screen's height
+	{
+		*h = gr_fill_h;
+		*w = (int)((long)gr_fill_h * gw / gh);
+	}
+	*x = (gr_fill_w - *w) / 2;
+	*y = (gr_fill_h - *h) / 2;
+}
+
+static int gr_filling(void)
+{
+	return gr_fill_w && (grd_curscreen->sc_w != gr_fill_w || grd_curscreen->sc_h != gr_fill_h);
+}
+
+// Draws the copied game picture into the given viewport (GL bottom-left origin)
+static void gr_fill_draw(int vx, int vy, int vw, int vh)
+{
+	float tu = (float)grd_curscreen->sc_w / gr_fill_tex_w, tv = (float)grd_curscreen->sc_h / gr_fill_tex_h;
+
+	glViewport(vx, vy, vw, vh);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_BLEND);
+	glDisable(GL_ALPHA_TEST);
+	glDisable(GL_CULL_FACE);
+	glDisable(GL_FOG);
+	glDisable(GL_LIGHTING);
+	glEnable(GL_TEXTURE_2D);
+	glBindTexture(GL_TEXTURE_2D, gr_fill_tex);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+	glColor4f(1, 1, 1, 1);
+	glMatrixMode(GL_TEXTURE);
+	glPushMatrix();
+	glLoadIdentity();
+	glMatrixMode(GL_PROJECTION);
+	glPushMatrix();
+	glLoadIdentity();
+	glOrtho(0, 1, 0, 1, -1, 1);
+	glMatrixMode(GL_MODELVIEW);
+	glPushMatrix();
+	glLoadIdentity();
+	glBegin(GL_QUADS);
+	glTexCoord2f(0, 0);   glVertex2f(0, 0);
+	glTexCoord2f(tu, 0);  glVertex2f(1, 0);
+	glTexCoord2f(tu, tv); glVertex2f(1, 1);
+	glTexCoord2f(0, tv);  glVertex2f(0, 1);
+	glEnd();
+	glPopMatrix();
+	glMatrixMode(GL_PROJECTION);
+	glPopMatrix();
+	glMatrixMode(GL_TEXTURE);
+	glPopMatrix();
+}
+
+static void gr_fill_present(void)
+{
+	int gw = grd_curscreen->sc_w, gh = grd_curscreen->sc_h, x, y, w, h;
+
+	if (!gr_filling())
+		return;
+	glPushAttrib(GL_ALL_ATTRIB_BITS);
+	if (!gr_fill_tex || gr_fill_tex_w < gw || gr_fill_tex_h < gh)
+	{
+		if (!gr_fill_tex)
+			glGenTextures(1, &gr_fill_tex);
+		for (gr_fill_tex_w = 1; gr_fill_tex_w < gw; gr_fill_tex_w <<= 1)
+			;
+		for (gr_fill_tex_h = 1; gr_fill_tex_h < gh; gr_fill_tex_h <<= 1)
+			;
+		glBindTexture(GL_TEXTURE_2D, gr_fill_tex);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, gr_fill_tex_w, gr_fill_tex_h, 0, GL_RGB, GL_UNSIGNED_BYTE, NULL);
+	}
+	glBindTexture(GL_TEXTURE_2D, gr_fill_tex);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); // pixel for pixel
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+	glReadBuffer(GL_BACK);
+	glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, gw, gh); // the game's picture, from the back buffer
+
+	glDisable(GL_SCISSOR_TEST);
+	glViewport(0, 0, gr_fill_w, gr_fill_h);
+	glClearColor(0, 0, 0, 1);
+	glClear(GL_COLOR_BUFFER_BIT);
+	gr_fill_rect(&x, &y, &w, &h);
+	gr_fill_draw(x, gr_fill_h - y - h, w, h);
+	glPopAttrib(); // the game's own viewport and state, which its 2D drawing relies on
+}
+
+// Screenshots read the front buffer, which holds the stretched picture. Put the last game picture
+// back into the back buffer at its own size and say so (1), so the screenshot reads that instead.
+static int gr_fill_back_for_read(void)
+{
+	if (!gr_filling() || !gr_fill_tex)
+		return 0;
+	glPushAttrib(GL_ALL_ATTRIB_BITS);
+	glDisable(GL_SCISSOR_TEST);
+	gr_fill_draw(0, 0, grd_curscreen->sc_w, grd_curscreen->sc_h);
+	glPopAttrib();
+	return 1;
+}
+#endif
+
+// Window pixels to game pixels (the mouse), for the stretched fullscreen borderless picture
+void gr_window_to_game(int *mx, int *my)
+{
+#ifndef OGLES
+	int x, y, w, h;
+
+	if (!gr_filling())
+		return;
+	gr_fill_rect(&x, &y, &w, &h);
+	*mx = (*mx - x) * grd_curscreen->sc_w / w;
+	*my = (*my - y) * grd_curscreen->sc_h / h;
+#endif
+}
+
 void ogl_swap_buffers_internal(void)
 {
 #ifdef OGLES
 	eglSwapBuffers(eglDisplay, eglSurface);
 #else
+	gr_fill_present();
 	SDL_GL_SwapBuffers();
 #endif
 }
@@ -280,6 +423,134 @@ void ogles_destroy(void)
 }
 #endif
 
+// The Fullscreen and Borderless window checkboxes give four modes:
+//   Fullscreen only        -> fullscreen exclusive (SDL_FULLSCREEN)
+//   Fullscreen + Borderless -> fullscreen borderless: a borderless window at the top-left of its monitor
+//   Borderless only        -> a borderless window, left where the window was
+//   neither                -> a bordered, movable window, kept on screen
+static int gr_fullscreen_ticked = 0;
+
+static void gr_apply_window_flags(void)
+{
+	sdl_video_flags &= ~(SDL_FULLSCREEN | SDL_NOFRAME);
+	if (gr_fullscreen_ticked && !GameCfg.BorderlessWindow)
+		sdl_video_flags |= SDL_FULLSCREEN;
+	if (GameCfg.BorderlessWindow || GameArg.SysNoBorders)
+		sdl_video_flags |= SDL_NOFRAME;
+}
+
+#ifdef _WIN32
+#include <windows.h>
+#include <SDL_syswm.h>
+
+static HWND gr_hwnd(void)
+{
+	SDL_SysWMinfo info;
+	SDL_VERSION(&info.version);
+	return (SDL_GetWMInfo(&info) > 0) ? info.window : NULL;
+}
+
+// Where the game picture (the window's client area) last sat in a window, in screen coordinates
+static POINT gr_last_client;
+static int gr_have_last_client = 0;
+
+// Before a mode change: remember where a windowed game sits, so the new window can go back there
+static void gr_window_remember(void)
+{
+	SDL_Surface *s = SDL_GetVideoSurface();
+	HWND h = gr_hwnd();
+	POINT p = { 0, 0 };
+
+	if (h && s && !(s->flags & SDL_FULLSCREEN) && !IsIconic(h) && ClientToScreen(h, &p))
+	{
+		gr_last_client = p;
+		gr_have_last_client = 1;
+	}
+}
+
+// After a mode change: place the window for its mode. Exclusive fullscreen is left alone.
+static void gr_window_place(void)
+{
+	HWND h = gr_hwnd();
+	RECT wr;
+	POINT c = { 0, 0 };
+	MONITORINFO mi;
+	int x, y, ww, wh;
+
+	if (!h || (sdl_video_flags & SDL_FULLSCREEN) || !GetWindowRect(h, &wr) || !ClientToScreen(h, &c))
+		return;
+	ww = wr.right - wr.left;
+	wh = wr.bottom - wr.top;
+	x = wr.left;
+	y = wr.top;
+	if (gr_have_last_client) // keep the game picture where it was; the border goes around it
+	{
+		x = gr_last_client.x - (c.x - wr.left);
+		y = gr_last_client.y - (c.y - wr.top);
+	}
+
+	mi.cbSize = sizeof(mi);
+	if (!GetMonitorInfo(MonitorFromPoint(gr_have_last_client ? gr_last_client : c, MONITOR_DEFAULTTONEAREST), &mi))
+		return;
+	if (gr_fullscreen_ticked) // fullscreen borderless: the top-left of its monitor, never moving
+	{
+		x = mi.rcMonitor.left;
+		y = mi.rcMonitor.top;
+	}
+	else if (!(sdl_video_flags & SDL_NOFRAME)) // bordered: keep it on screen; too big: top-left, so the title bar shows
+	{
+		if (x + ww > mi.rcWork.right)
+			x = mi.rcWork.right - ww;
+		if (y + wh > mi.rcWork.bottom)
+			y = mi.rcWork.bottom - wh;
+		if (x < mi.rcWork.left)
+			x = mi.rcWork.left;
+		if (y < mi.rcWork.top)
+			y = mi.rcWork.top;
+	}
+	SetWindowPos(h, NULL, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+int gr_monitor_size(int *w, int *h)
+{
+	HWND hw = gr_hwnd();
+	MONITORINFO mi;
+	POINT p = { 0, 0 };
+
+	if (gr_have_last_client)
+		p = gr_last_client;
+	mi.cbSize = sizeof(mi);
+	if (!GetMonitorInfo(hw ? MonitorFromWindow(hw, MONITOR_DEFAULTTONEAREST) : MonitorFromPoint(p, MONITOR_DEFAULTTOPRIMARY), &mi))
+		return 0; // no window yet: the monitor it will open on
+	*w = mi.rcMonitor.right - mi.rcMonitor.left;
+	*h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+	return 1;
+}
+#else
+static void gr_window_remember(void) {}
+static void gr_window_place(void) {}
+int gr_monitor_size(int *w, int *h) { w = w; h = h; return 0; }
+#endif
+
+// Fullscreen borderless: the window becomes monitor-sized and the game picture is stretched into it
+// (gr_fill_present). Anything else: the window is the game's own size.
+static void gr_fill_size(int *use_x, int *use_y, Uint32 flags)
+{
+#ifndef OGLES
+	gr_fill_tex = 0; // a new video mode may come with a new GL context
+	gr_fill_w = gr_fill_h = 0;
+	if (gr_fullscreen_ticked && (flags & SDL_NOFRAME) && !(flags & SDL_FULLSCREEN) && !sdl_no_modeswitch
+		&& gr_monitor_size(&gr_fill_w, &gr_fill_h) && gr_fill_w >= *use_x && gr_fill_h >= *use_y)
+	{
+		gr_fill_h++; // 1 pixel taller than the monitor, so Windows doesn't take it for real fullscreen and skip the compositor (Discord/OBS screen capture froze)
+		*use_x = gr_fill_w;
+		*use_y = gr_fill_h;
+	}
+	else
+		gr_fill_w = gr_fill_h = 0;
+#endif
+}
+
 int ogl_init_window(int x, int y)
 {
 	int use_x,use_y,use_bpp;
@@ -313,7 +584,7 @@ int ogl_init_window(int x, int y)
 		ogl_smash_texture_list_internal();//if we are or were fullscreen, changing vid mode will invalidate current textures
 
 	SDL_WM_SetCaption(DESCENT_VERSION, "Descent II");
-	SDL_WM_SetIcon( SDL_LoadBMP( "d2x-rebirth.bmp" ), NULL );
+	SDL_WM_SetIcon( SDL_LoadBMP( "d2x-redux.bmp" ), NULL );
 
 	use_x=x;
 	use_y=y;
@@ -331,6 +602,8 @@ int ogl_init_window(int x, int y)
 		}
 	}
 
+	gr_window_remember();
+	gr_fill_size(&use_x, &use_y, use_flags);
 	if (!SDL_SetVideoMode(use_x, use_y, use_bpp, use_flags))
 	{
 #ifdef RPI
@@ -340,6 +613,7 @@ int ogl_init_window(int x, int y)
 		Error("Could not set %dx%dx%d opengl video mode: %s\n", x, y, GameArg.DbgBpp, SDL_GetError());
 #endif
 	}
+	gr_window_place();
 	SDL_Surface t_Surf;
 
 #ifdef OGLES
@@ -418,6 +692,12 @@ int ogl_init_window(int x, int y)
 		con_printf(CON_DEBUG, "EGL: made context current\n");
 	}
 #endif
+	glewInit();
+#ifdef OGL_MERGE
+	ogl_init_prog();
+#endif
+	if (Game_wind)
+		ogl_cache_level_textures();
 
 	linedotscale = ((x/640<y/480?x/640:y/480)<1?1:(x/640<y/480?x/640:y/480));
 
@@ -427,15 +707,13 @@ int ogl_init_window(int x, int y)
 
 int gr_check_fullscreen(void)
 {
-	return (sdl_video_flags & SDL_FULLSCREEN)?1:0;
+	return gr_fullscreen_ticked; // the Fullscreen checkbox, exclusive or borderless
 }
 
 int gr_toggle_fullscreen(void)
 {
-	if (sdl_video_flags & SDL_FULLSCREEN)
-		sdl_video_flags &= ~SDL_FULLSCREEN;
-	else
-		sdl_video_flags |= SDL_FULLSCREEN;
+	gr_fullscreen_ticked = !gr_fullscreen_ticked;
+	gr_apply_window_flags();
 
 	if (gl_initialized)
 	{
@@ -445,10 +723,14 @@ int gr_toggle_fullscreen(void)
 				con_printf(CON_URGENT,"Cannot set %ix%i. Fallback to 640x480\n",SM_W(Game_screen_mode), SM_H(Game_screen_mode));
 				Game_screen_mode=SM(640,480);
 			}
-			if (!SDL_SetVideoMode(SM_W(Game_screen_mode), SM_H(Game_screen_mode), GameArg.DbgBpp, sdl_video_flags))
+			int use_x = SM_W(Game_screen_mode), use_y = SM_H(Game_screen_mode);
+			gr_window_remember();
+			gr_fill_size(&use_x, &use_y, sdl_video_flags);
+			if (!SDL_SetVideoMode(use_x, use_y, GameArg.DbgBpp, sdl_video_flags))
 			{
 				Error("Could not set %dx%dx%d opengl video mode: %s\n", SM_W(Game_screen_mode), SM_H(Game_screen_mode), GameArg.DbgBpp, SDL_GetError());
 			}
+			gr_window_place();
 		}
 #ifdef RPI
 		if (rpi_setup_element(SM_W(Game_screen_mode), SM_H(Game_screen_mode), sdl_video_flags, 1)) {
@@ -474,9 +756,14 @@ int gr_toggle_fullscreen(void)
 		glEnable(GL_BLEND);
 		glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 		ogl_smash_texture_list_internal();//if we are or were fullscreen, changing vid mode will invalidate current textures
+#ifdef OGL_MERGE
+		ogl_init_prog();
+#endif
+		if (Game_wind)
+			ogl_cache_level_textures();
 	}
-	GameCfg.WindowMode = (sdl_video_flags & SDL_FULLSCREEN)?0:1;
-	return (sdl_video_flags & SDL_FULLSCREEN)?1:0;
+	GameCfg.WindowMode = gr_fullscreen_ticked?0:1;
+	return gr_fullscreen_ticked;
 }
 
 static void ogl_init_state(void)
@@ -507,6 +794,26 @@ void gr_set_draw_buffer(int buf)
 #ifndef OGLES
 	glDrawBuffer((buf == 0) ? GL_FRONT : GL_BACK);
 #endif
+}
+
+// Can this backend control vsync? No -- not while built against SDL 1.2.
+//
+// This backend does present through an OpenGL context, so a swap interval is
+// the natural mechanism, but SDL 1.2 exposes no way to set or query it: the
+// equivalent of SDL_GL_SetSwapInterval() only arrived in SDL 2.0. The driver
+// may still apply vsync on its own, but the application can neither turn it on
+// nor determine whether it is active.
+//
+// Reporting 0 hides the VSync option in the menus and makes game.c ignore
+// GameCfg.VSync entirely, which is the honest outcome: an option that cannot
+// reach the driver must not appear to work.
+//
+// If this is ever ported to SDL 2, return non-zero once the swap interval is
+// actually being set (SDL_GL_SetSwapInterval / SDL_GL_GetSwapInterval), and the
+// option will appear by itself.
+int gr_vsync_supported(void)
+{
+	return 0;
 }
 
 const char *gl_vendor, *gl_renderer, *gl_version, *gl_extensions;
@@ -645,6 +952,8 @@ int gr_set_mode(u_int32_t mode)
 	gr_init_canvas(&grd_curscreen->sc_canvas, d_realloc(gr_bm_data,w*h), BM_OGL, w, h);
 	gr_set_current_canvas(NULL);
 
+	gr_apply_window_flags();
+
 	ogl_init_window(w,h);//platform specific code
 	ogl_get_verinfo();
 	OGL_VIEWPORT(0,0,w,h);
@@ -723,6 +1032,12 @@ void gr_set_attributes(void)
 	ogl_smash_texture_list_internal();
 	gr_remap_color_fonts();
 	gr_remap_mono_fonts();
+#ifdef OGL_MERGE
+	if (gl_initialized)
+		ogl_init_prog();
+#endif
+	if (Game_wind)
+		ogl_cache_level_textures();
 }
 
 int gr_init(int mode)
@@ -757,11 +1072,9 @@ int gr_init(int mode)
 	ogl_init_load_library();
 #endif
 
-	if (!GameCfg.WindowMode && !GameArg.SysWindow)
-		sdl_video_flags|=SDL_FULLSCREEN;
-
-	if (GameArg.SysNoBorders)
-		sdl_video_flags|=SDL_NOFRAME;
+	gr_fullscreen_ticked = (!GameCfg.WindowMode && !GameArg.SysWindow);
+	gr_apply_window_flags();
+	SDL_putenv("SDL_VIDEO_CENTERED=1"); // a window opens in the middle of the screen; later mode changes keep it in place
 
 	gr_set_attributes();
 
@@ -811,10 +1124,8 @@ void gr_close()
 		d_free(grd_curscreen);
 	}
 	ogl_close_pixel_buffers();
-#ifdef _WIN32
-	if (ogl_rt_loaded)
-		OpenGL_LoadLibrary(false);
-#endif
+	// opengl32.dll is not unloaded here: SDL still has its OpenGL window open until SDL_Quit(),
+	// and pulling the library out from under it crashed in OPENGL32.dll on exit. Windows frees it with the process.
 
 #ifdef OGLES
 	ogles_destroy();
@@ -907,6 +1218,7 @@ void ogl_urect(int left,int top,int right,int bot)
 	glColorPointer(4, GL_FLOAT, 0, color_array);
 	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);//replaced GL_QUADS
 	glDisableClientState(GL_VERTEX_ARRAY);
+	glDisableClientState(GL_COLOR_ARRAY);
 }
 
 void ogl_ulinec(int left,int top,int right,int bot,int c)
@@ -919,9 +1231,9 @@ void ogl_ulinec(int left,int top,int right,int bot,int c)
 	glEnableClientState(GL_COLOR_ARRAY);
 	
 	xo = (left + grd_curcanv->cv_bitmap.bm_x + 0.5) / (float)last_width;
-	xf = (right + grd_curcanv->cv_bitmap.bm_x + 1.0) / (float)last_width;
+	xf = (right + grd_curcanv->cv_bitmap.bm_x + 0.5) / (float)last_width;
 	yo = 1.0 - (top + grd_curcanv->cv_bitmap.bm_y + 0.5) / (float)last_height;
-	yf = 1.0 - (bot + grd_curcanv->cv_bitmap.bm_y + 1.0) / (float)last_height;
+	yf = 1.0 - (bot + grd_curcanv->cv_bitmap.bm_y + 0.5) / (float)last_height;
  
 	OGL_DISABLE(TEXTURE_2D);
 
@@ -1030,25 +1342,51 @@ typedef struct
 
 //writes out an uncompressed RGB .tga file
 //if we got really spiffy, we could optionally link in libpng or something, and use that.
-void write_bmp(char *savename,int w,int h,unsigned char *buf)
+void write_bmp(char *savename,int w,int h)
 {
-	PHYSFS_file* TGAFile;
+	unsigned char *rgbaBuf, *buf;
+	#ifdef HAVE_LIBPNG
+	png_data pdata;
+	int x, y;
+	#else
 	TGA_header TGA;
 	GLbyte HeightH,HeightL,WidthH,WidthL;
-	unsigned int pixel;
-	unsigned char *rgbaBuf;
+	PHYSFS_File *TGAFile;
+	int pixel;
+	#endif
 
-	buf = (unsigned char*)d_calloc(w*h*4,sizeof(unsigned char));
+	buf = (unsigned char*)d_malloc(w * h * 3);
 
-	rgbaBuf = (unsigned char*) d_calloc(w * h * 4, sizeof(unsigned char));
+	rgbaBuf = (unsigned char*) d_malloc(w * h * 4);
 	glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgbaBuf);
+	#ifdef HAVE_LIBPNG
+	for(y = 0; y < h; y++) {
+		int wofs = y * w * 3, rofs = (h - 1 - y) * w * 4;
+		for(x = 0; x < w; x++) {
+			*(buf + wofs + x * 3) = *(rgbaBuf + rofs + x * 4);
+			*(buf + wofs + x * 3 + 1) = *(rgbaBuf + rofs + x * 4 + 1);
+			*(buf + wofs + x * 3 + 2) = *(rgbaBuf + rofs + x * 4 + 2);
+		}
+	}
+	#else
 	for(pixel = 0; pixel < w * h; pixel++) {
 		*(buf + pixel * 3) = *(rgbaBuf + pixel * 4 + 2);
 		*(buf + pixel * 3 + 1) = *(rgbaBuf + pixel * 4 + 1);
 		*(buf + pixel * 3 + 2) = *(rgbaBuf + pixel * 4);
 	}
+	#endif
 	d_free(rgbaBuf);
 
+	#ifdef HAVE_LIBPNG
+	memset(&pdata, 0, sizeof(pdata));
+	pdata.width = w;
+	pdata.height = h;
+	pdata.data = buf;
+	pdata.depth = 8;
+
+	if (!write_png(savename, &pdata))
+		con_printf(CON_URGENT,"Could not create PNG file to dump screenshot!");
+	#else
 	if (!(TGAFile = PHYSFSX_openWriteBuffered(savename)))
 	{
 		con_printf(CON_URGENT,"Could not create TGA file to dump screenshot!");
@@ -1082,6 +1420,8 @@ void write_bmp(char *savename,int w,int h,unsigned char *buf)
 	PHYSFS_write(TGAFile,&TGA,sizeof(TGA_header),1);
 	PHYSFS_write(TGAFile,buf,w*h*3*sizeof(unsigned char),1);
 	PHYSFS_close(TGAFile);
+	#endif
+
 	d_free(buf);
 }
 
@@ -1089,7 +1429,11 @@ void save_screen_shot(int automap_flag)
 {
 	static int savenum=0;
 	char savename[13+sizeof(SCRNS_DIR)];
-	unsigned char *buf;
+	#ifdef HAVE_LIBPNG
+	const char *ext = "png";
+	#else
+	const char *ext = "tga";
+	#endif
 
 	if (!GameArg.DbgGlReadPixelsOk){
 		if (!automap_flag)
@@ -1104,19 +1448,17 @@ void save_screen_shot(int automap_flag)
 
 	do
 	{
-		sprintf(savename, "%sscrn%04d.tga",SCRNS_DIR, savenum++);
+		sprintf(savename, "%sscrn%04d.%s", SCRNS_DIR, savenum++, ext);
 	} while (PHYSFSX_exists(savename,0));
 
 	if (!automap_flag)
-		HUD_init_message(HM_DEFAULT, "%s 'scrn%04d.tga'", TXT_DUMPING_SCREEN, savenum-1 );
+		HUD_init_message(HM_DEFAULT, "%s '%s'", TXT_DUMPING_SCREEN, savename + strlen(SCRNS_DIR));
 
 #ifndef OGLES
-	glReadBuffer(GL_FRONT);
+	glReadBuffer(gr_fill_back_for_read() ? GL_BACK : GL_FRONT);
 #endif
 
-	buf = d_malloc(grd_curscreen->sc_w*grd_curscreen->sc_h*3);
-	write_bmp(savename,grd_curscreen->sc_w,grd_curscreen->sc_h,buf);
-	d_free(buf);
+	write_bmp(savename,grd_curscreen->sc_w,grd_curscreen->sc_h);
 
 	start_time();
 }

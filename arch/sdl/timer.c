@@ -4,7 +4,11 @@
  *
  */
 
-#include <SDL/SDL.h>
+#include <SDL.h>
+#ifdef WIN32
+#include <windows.h>
+#include <mmsystem.h>
+#endif
 
 #include "maths.h"
 #include "timer.h"
@@ -16,7 +20,7 @@ void timer_update(void)
 {
 	static ubyte init = 1;
 	static fix64 last_tv = 0;
-	fix64 cur_tv = SDL_GetTicks()*F1_0/1000;
+	fix64 cur_tv = (fix64)SDL_GetTicks()*F1_0/1000;
 
 	if (init)
 	{
@@ -32,6 +36,97 @@ void timer_update(void)
 fix64 timer_query(void)
 {
 	return (F64_RunTime);
+}
+
+// Raise the OS timer resolution so SDL_Delay() can actually return early.
+//
+// Windows' default timer period is ~15.6ms, which means SDL_Delay(1) commonly
+// sleeps 15ms. For frame pacing above 60fps that is fatal: every frame overshoots
+// its deadline by more than a whole frame interval, so the cap cannot be hit no
+// matter how the deadline arithmetic is written. timeBeginPeriod(1) pulls it down
+// to ~1ms for the rest of the process.
+//
+// Called once at startup. timeEndPeriod() is deliberately NOT called on exit --
+// Windows rebalances the timer resolution automatically when the process dies,
+// and mismatched begin/end pairs are a common source of hangs in other programs.
+void timer_set_high_res(void)
+{
+#ifdef WIN32
+	static int done = 0;
+
+	if (done)
+		return;
+	done = 1;
+
+	if (timeBeginPeriod(1) != TIMERR_NOERROR)
+	{
+		// Not fatal: pacing still works, just more coarsely.
+	}
+
+	// Windows 11 throttles a process whose window is behind another one
+	// (EcoQoS, and it ignores the 1ms timer request above). With two copies
+	// on one PC the one in the background stalls, so opt out of both.
+	// Loaded at run time: SetProcessInformation needs Windows 8 or later.
+	{
+		struct { ULONG Version, ControlMask, StateMask; } throttle = { 1, 0x1 | 0x4, 0 }; // EXECUTION_SPEED | IGNORE_TIMER_RESOLUTION, off
+		typedef BOOL (WINAPI *set_process_info_fn)(HANDLE, int, LPVOID, DWORD);
+		HMODULE k32 = GetModuleHandleA("kernel32.dll");
+		set_process_info_fn set_info = k32 ? (set_process_info_fn)GetProcAddress(k32, "SetProcessInformation") : NULL;
+
+		if (set_info)
+			set_info(GetCurrentProcess(), 4 /* ProcessPowerThrottling */, &throttle, sizeof(throttle));
+	}
+#endif
+}
+
+// High resolution pacing clock.
+//
+// Deliberately kept SEPARATE from timer_query(). timer_update() only advances
+// F64_RunTime when SDL_GetTicks() changes, i.e. it advances in ~1ms steps.
+// Frame pacing at 100+fps needs sub-ms resolution to land on its deadline, so
+// this uses QueryPerformanceCounter (SDL 1.2 exposes no equivalent of SDL2's
+// SDL_GetPerformanceCounter).
+//
+// Returns a monotonically increasing fix64 count in the same F1_0-based units as
+// timer_query(), but with much finer resolution. Because it is a different epoch
+// than F64_RunTime, it must ONLY be used to measure *differences* (frame times
+// and deadlines) -- never compared against timer_query().
+//
+// NOTE: do not use this to drive gameplay timing. Netplay (net_udp.c ping),
+// AI, demos and menus all key off timer_query(); changing that resolution
+// risks demo desync and netplay regressions.
+fix64 timer_query_perf(void)
+{
+#ifdef WIN32
+	static LARGE_INTEGER freq;
+	LARGE_INTEGER cnt;
+
+	if (!freq.QuadPart)
+	{
+		if (!QueryPerformanceFrequency(&freq) || !freq.QuadPart)
+			return F64_RunTime;				// fall back to the coarse clock
+		QueryPerformanceCounter(&cnt);
+	}
+
+	QueryPerformanceCounter(&cnt);
+
+	// Split into whole seconds + remainder before scaling. Multiplying the raw
+	// counter by F1_0 directly can overflow 64 bits on machines with a long
+	// uptime and a 10MHz counter (~6.5e19 vs the ~1.8e19 int64 max).
+	return (fix64)((cnt.QuadPart / freq.QuadPart) * (LONGLONG)F1_0)
+			+ (fix64)(((LONGLONG)F1_0 * (cnt.QuadPart % freq.QuadPart)) / freq.QuadPart);
+#else
+	return F64_RunTime;
+#endif
+}
+
+// Sleep for approximately 'ms' milliseconds without the f2i() truncation that
+// timer_delay() suffers. Used by the frame pacer to avoid sleeping to within a
+// fraction of a millisecond of the deadline, where quantisation dominates.
+void timer_delay_ms(int ms)
+{
+	if (ms > 0)
+		SDL_Delay((Uint32)ms);
 }
 
 void timer_delay(fix seconds)

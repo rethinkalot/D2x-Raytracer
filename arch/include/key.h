@@ -20,7 +20,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #ifndef _KEY_H
 #define _KEY_H 
 
-#include <SDL/SDL_keysym.h>
+#include <SDL_keysym.h>
 #include "pstypes.h"
 #include "fix.h"
 #include "event.h"
@@ -29,6 +29,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 //#define RT_KEY_LOG 
 
 #define KEY_BUFFER_SIZE 16
+#define KEY_MAC(x)	// Mac-only key cases (KEY_COMMAND) compile away on Windows
 #define KEY_REPEAT_DELAY 400
 #define KEY_REPEAT_INTERVAL 50
 

@@ -45,11 +45,27 @@ typedef struct Cfg
 	int WindowMode;
 	int TexFilt;
 	int MovieTexFilt;
+	int BriefingRobots3D; // briefings draw robots as live 3D models instead of the low-resolution movies
 	int MovieSubtitles;
 	int VSync;
 	int Multisample;
+	int UseCustomModels;
+	int UseCustomTextures;
+	// Reduced palette flash effects, in the same spirit as UseCustomModels:
+	// single player always honours it, multiplayer only when the netgame allows
+	// it, and the menu item is a check that reads "on" in both cases.
+	int ReducedFlash;
 	int FPSIndicator;
 	int Grabinput;
+	int ClassicDepth;
+	int BorderlessWindow;
+	int GamePort; // Join Manually GAME PORT: the port games are searched on; 0 = use -udp_gameport or the default
+	// Screen Resolution menu "use custom values": while on, the list shows only the ResFilterW:ResFilterH
+	// shape (0 = every shape) plus up to 2 custom resolutions (SM() modes, 0 = empty)
+	int ResCustom;
+	int ResFilterW;
+	int ResFilterH;
+	u_int32_t ResExtra[2];
 } __pack__ Cfg;
 
 extern struct Cfg GameCfg;

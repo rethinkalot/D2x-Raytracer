@@ -105,6 +105,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "byteswap.h"
 #include "segment.h"
 #include "gameseg.h"
+#include "multibot.h"
 
 
 void StartNewLevelSecret(int level_num, int page_in_textures);
@@ -130,6 +131,7 @@ obj_position	Player_init[MAX_PLAYERS];
 int NumNetPlayerPositions = -1;
 
 extern fix ThisLevelTime;
+extern fix Cruise_speed; // kconfig.c
 
 // Extern from game.c to fix a bug in the cockpit!
 
@@ -158,7 +160,7 @@ void verify_console_object()
 	Assert( Player_num > -1 );
 	Assert( Players[Player_num].objnum > -1 );
 	ConsoleObject = &Objects[Players[Player_num].objnum];
-	Assert( ConsoleObject->type==OBJ_PLAYER );
+	Assert( ConsoleObject->type==OBJ_PLAYER || (is_observer() && Player_num == OBSERVER_PLAYER_ID) );
 	Assert( ConsoleObject->id==Player_num );
 }
 
@@ -196,6 +198,7 @@ void
 gameseq_init_network_players()
 {
 	int i,k,j;
+	int spare[MAX_PLAYERS*2], nspare = 0; // co-op: unused player starts, kept as fallback starts
 
 	// Initialize network player start locations and object numbers
 
@@ -217,6 +220,8 @@ gameseq_init_network_players()
 				Objects[i].id = k;
 				k++;
 			}
+			else if ((Game_mode & GM_MULTI_COOP) && Objects[i].type != OBJ_COOP && nspare < (int)(sizeof(spare)/sizeof(spare[0])))
+				spare[nspare++] = i;
 			else
 				obj_delete(i);
 			j++;
@@ -226,7 +231,46 @@ gameseq_init_network_players()
 			obj_delete(i);		//kill the buddy in netgames
 
 	}
+	// Co-op keeps only the first player start plus the co-op starts. A level without enough co-op starts
+	// would put several players on one spot, so its other player starts are used until there are 8
+	for (i = 0; i < nspare; i++)
+	{
+		int o = spare[i];
+
+		if (k < MAX_PLAYERS)
+		{
+			Objects[o].type = OBJ_PLAYER;
+			Player_init[k].pos = Objects[o].pos;
+			Player_init[k].orient = Objects[o].orient;
+			Player_init[k].segnum = Objects[o].segnum;
+			Players[k].objnum = o;
+			Objects[o].id = k;
+			k++;
+		}
+		else
+			obj_delete(o);
+	}
+
 	NumNetPlayerPositions = k;
+
+	if (Game_mode & GM_MULTI) {
+		// Ensure we have 8 starting locations, even if there aren't 8 in the file.  This makes observer mode work in all levels.
+		for (; k < MAX_PLAYERS; k++) {
+			i = obj_allocate();
+
+			Objects[i].type = OBJ_PLAYER;
+
+			Player_init[k].pos = Player_init[k % NumNetPlayerPositions].pos;
+			Player_init[k].orient = Player_init[k % NumNetPlayerPositions].orient;
+			Player_init[k].segnum = Player_init[k % NumNetPlayerPositions].segnum;
+			Players[k].objnum = i;
+			Objects[i].id = k;
+
+			Objects[i].attached_obj = -1;
+		}
+
+		NumNetPlayerPositions = MAX_PLAYERS;
+	}
 }
 
 void gameseq_remove_unused_players()
@@ -240,7 +284,7 @@ void gameseq_remove_unused_players()
 	{
 		for (i=0; i < NumNetPlayerPositions; i++)
 		{
-			if ((!Players[i].connected) || (i >= N_players))
+			if ((i == 0 && Netgame.host_is_obs) || (!Players[i].connected) || (i >= N_players))
 			{
 				multi_make_player_ghost(i);
 			}
@@ -282,11 +326,16 @@ void init_player_stats_game(ubyte pnum)
 	Players[pnum].hostages_total = 0;
 	Players[pnum].laser_level = 0;
 	Players[pnum].flags = 0;
+	Players[pnum].shields_delta = 0;
+	Players[pnum].shields_time = 0;
 
 	init_player_stats_new_ship(pnum);
 
 	if (pnum == Player_num)
 		First_secret_visit = 1;
+
+	if (pnum == Player_num && Game_mode & GM_MULTI)
+		multi_send_ship_status();
 }
 
 void init_ammo_and_energy(void)
@@ -309,9 +358,247 @@ void init_ammo_and_energy(void)
 
 extern	ubyte	Last_afterburner_state;
 
+// Speedrun timers, advanced from game.c. RTA accumulates during gameplay and
+// between-level transitions. IGT accumulates only during active gameplay, so
+// it pauses during menus, cutscenes, loading and other non-gameplay time. RTA
+// also keeps running in the background during a pause. Both clocks are cumulative
+// across levels and share one wall-clock source with independent
+// gates. Variable names match the current displayed labels.
+//
+// Displayed green while the run is "clean". White means the run was interrupted
+// by a save/load, i.e. a null attempt -- the times shown are still correct, but
+// the run no longer counts as uninterrupted.
+//
+// Both clock values are in milliseconds.
+fix64 Speedrun_rta = 0;			// RTA: real time from first spawn through exits and transitions
+fix64 Speedrun_igt = 0;			// IGT: active gameplay only
+int Speedrun_rta_running = 0;
+int Speedrun_igt_running = 0;
+int Speedrun_continued = 0;		// set when a saved game was loaded
+int Speedrun_gameplay = 0;		// true only while actually flying
+static int Speedrun_transitioning = 0;
+static int Speedrun_has_started = 0;
+static int Speedrun_pause_menu = 0;
+static fix64 speedrun_last_perf = 0;
+
+// Shared timer_query_perf() baseline. It advances on every sample so excluded
+// time cannot leak into the next gameplay or transition delta.
+
+// Gameplay is detected from the visible game window and unpaused simulation.
+// That advances both clocks. While a between-level transition is active, only
+// RTA advances for the active run. IGT advances only during active gameplay.
+static void speedrun_advance_clocks(int advance_rta, int advance_igt)
+{
+	// One clock reading, shared by both timers, so their rates cannot drift
+	// apart from rounding or from being sampled at slightly different moments.
+	fix64 now = timer_query_perf();
+
+	if (speedrun_last_perf)
+	{
+		fix64 delta = now - speedrun_last_perf;	// fix (1/65536 s)
+
+		// Guard against a bogus/negative delta (clock reset, debugger break).
+		if (delta > 0)
+		{
+			fix64 delta_ms = (delta * 1000) / F1_0;
+
+			if (advance_rta && Speedrun_rta_running)
+				Speedrun_rta += delta_ms;
+
+			if (advance_igt && Speedrun_igt_running)
+				Speedrun_igt += delta_ms;
+		}
+	}
+
+	// The baseline tracks wall time unconditionally, NOT the running flags.
+	// If it were reset whenever IGT was stopped, the time spent paused would be
+	// silently dropped from the next delta -- the very gap IGT exists to count.
+	speedrun_last_perf = now;
+}
+
+// Advance RTA while drawing between-level transition screens. IGT remains paused.
+void speedrun_transition_tick(void)
+{
+	if (Speedrun_transitioning)
+		speedrun_set_gameplay(0);
+	// This is also called by the pause overlay and boxed transition messages.
+	// RTA keeps advancing after spawn even when the game window is covered.
+	speedrun_advance_clocks(Speedrun_rta_running, 0);
+}
+
+void speedrun_tick(void)
+{
+	int gameplay;
+	int advance_rta;
+	int advance_igt;
+
+	// The window must be the visible front window (not hidden behind a menu),
+	// we must not be in an endlevel/cutscene/prepare-for-descent sequence, and
+	// the simulation must not be paused.
+	gameplay = Game_wind != NULL && window_is_visible(Game_wind)
+		&& !Endlevel_sequence && !game_time_is_paused();
+	advance_igt = gameplay;
+	speedrun_set_gameplay(gameplay);
+	advance_rta = Speedrun_rta_running;
+
+	speedrun_advance_clocks(advance_rta, advance_igt);
+	if (gameplay)
+	{
+		Speedrun_has_started = 1;
+		Speedrun_transitioning = 0;
+	}
+}
+
+// Full restart: brand new game from the menus.
+void speedrun_new_game(void)
+{
+	Speedrun_rta = 0;
+	Speedrun_igt = 0;
+	Speedrun_rta_running = 1;
+	Speedrun_igt_running = 0;
+	Speedrun_gameplay = 0;
+	Speedrun_transitioning = 0;
+	Speedrun_has_started = 0;
+	Speedrun_pause_menu = 0;
+	Speedrun_continued = 0;
+	speedrun_last_perf = 0;		// restart the wall-clock baseline from this instant
+}
+
+// Level entry never resets either cumulative clock. RTA includes marked
+// transitions; IGT resumes when the next level becomes playable.
+void speedrun_level_start(void)
+{
+	Speedrun_rta_running = Speedrun_transitioning;
+	Speedrun_igt_running = 0;
+	Speedrun_gameplay = 0;
+}
+
+// A new level is being entered after the run has already started. Count the
+// full transition, including its briefing/movie and synchronous load period.
+void speedrun_transition_start(void)
+{
+	if (!Speedrun_has_started)
+		return;
+
+	Speedrun_transitioning = 1;
+	Speedrun_gameplay = 0;
+	Speedrun_igt_running = 0;
+	Speedrun_rta_running = 1;
+}
+
+void speedrun_transition_stop(void)
+{
+	// Include any transition time since the last frame/sample before stopping.
+	if (Speedrun_transitioning)
+		speedrun_advance_clocks(1, 0);
+	Speedrun_rta_running = 0;
+	Speedrun_transitioning = 0;
+	Speedrun_gameplay = 0;
+	Speedrun_igt_running = 0;
+	Speedrun_has_started = 0;
+	Speedrun_pause_menu = 0;
+}
+
+void speedrun_pause_menu_set(int visible)
+{
+	Speedrun_pause_menu = visible;
+}
+
+int speedrun_pause_menu_is_visible(void)
+{
+	return Speedrun_pause_menu;
+}
+
+// IGT follows active gameplay; RTA follows gameplay plus a marked transition.
+void speedrun_set_gameplay(int active)
+{
+	Speedrun_gameplay = active;
+	Speedrun_igt_running = active;
+	if (active)
+	{
+		Speedrun_has_started = 1;
+		Speedrun_transitioning = 0;
+		Speedrun_igt_running = 1;
+	}
+	Speedrun_rta_running = Speedrun_has_started || active || Speedrun_transitioning;
+}
+
+// A level exit starts a between-level transition. Final-game handling stops
+// it explicitly once the run is complete.
+void speedrun_level_finished(void)
+{
+	Speedrun_gameplay = 0;
+	Speedrun_transitioning = Speedrun_has_started;
+	Speedrun_igt_running = 0;
+	Speedrun_rta_running = Speedrun_transitioning;
+}
+
+// Quitting to the main menu clears both accumulated clocks and run state.
+void speedrun_quit_to_menu(void)
+{
+	Speedrun_rta_running = 0;
+	Speedrun_igt_running = 0;
+	Speedrun_rta = 0;
+	Speedrun_igt = 0;
+	Speedrun_continued = 0;
+	speedrun_last_perf = 0;
+	Speedrun_gameplay = 0;
+	Speedrun_transitioning = 0;
+	Speedrun_has_started = 0;
+	Speedrun_pause_menu = 0;
+}
+
+// Saved values are restored after initialization, and the continued marker
+// identifies the run as interrupted.
+void speedrun_game_loaded(void)
+{
+	// Clear both up front. If the save carries stored values the state loader
+	// restores them immediately afterwards and overwrites these; if the save
+	// predates persistence there is nothing to restore, so both correctly start
+	// from zero rather than leaking in whatever was on screen before the load.
+	Speedrun_rta = 0;
+	Speedrun_igt = 0;
+	Speedrun_rta_running = 1;
+	Speedrun_igt_running = 0;
+	Speedrun_gameplay = 0;
+	Speedrun_transitioning = 0;
+	Speedrun_has_started = 1;
+	Speedrun_continued = 1;
+	speedrun_last_perf = 0;		// restart the wall-clock baseline from this instant
+}
+
+// Restore the IGT value carried in a save file.
+//
+// Negative values are rejected: they cannot arise from a legitimate save and
+// would run the display backwards.
+void speedrun_igt_restored(fix64 ms)
+{
+	if (ms < 0)
+		return;
+
+	Speedrun_igt = ms;
+}
+
+// Restore the RTA value carried in a save file.
+//
+// Kept separate from speedrun_igt_restored() so the version-tagged loader in
+// state.c can apply the two independently. Legacy saves map their old RTA-only
+// value to current IGT because the timer labels were swapped after those saves.
+void speedrun_rta_restored(fix64 ms)
+{
+	if (ms < 0)
+		return;
+
+	Speedrun_rta = ms;
+}
+
 // Setup player for new level (After completion of previous level)
 void init_player_stats_level(int secret_flag)
 {
+	// A new level spawned: arm the session clock. Neither accumulated value is
+	// touched -- the RTA is cumulative across the whole run, not a per-level split.
+	speedrun_level_start();
+
 	// int	i;
 
 	Players[Player_num].last_score = Players[Player_num].score;
@@ -370,6 +657,9 @@ void init_player_stats_level(int secret_flag)
 	init_gauges();
 
 	Missile_viewer = NULL;
+
+	if (Game_mode & GM_MULTI)
+		multi_send_ship_status();
 }
 
 extern	void init_ai_for_ship(void);
@@ -387,8 +677,8 @@ void init_player_stats_new_ship(ubyte pnum)
 			newdemo_record_player_weapon(0, 0);
 			newdemo_record_player_weapon(1, 0);
 		}
-		Primary_weapon = 0;
-		Secondary_weapon = 0;
+		Players[Player_num].primary_weapon = 0;
+		Players[Player_num].secondary_weapon = 0;
 		for (i=0; i<MAX_PRIMARY_WEAPONS; i++)
 			Primary_last_was_super[i] = 0;
 		for (i=1; i<MAX_SECONDARY_WEAPONS; i++)
@@ -407,8 +697,11 @@ void init_player_stats_new_ship(ubyte pnum)
 		if(delete_camera)
 			Dead_player_camera = 0;
 
+		// AutoselectOnlyOnce: a new life gets a fresh one-shot allowance.
+		PrimaryWeaponPickedUp = 0;
+		SecondaryWeaponPickedUp = 0;
+
 		Global_laser_firing_count=0;
-		Afterburner_charge = 0;
 		Controls.afterburner_state = 0;
 		Last_afterburner_state = 0;
 		Missile_viewer=NULL; //reset missile camera if out there
@@ -418,6 +711,7 @@ void init_player_stats_new_ship(ubyte pnum)
 
 	Players[pnum].energy = INITIAL_ENERGY;
 	Players[pnum].shields = StartingShields;
+	Players[pnum].shields_certain = 1;
 	Players[pnum].laser_level = 0;
 	Players[pnum].killer_objnum = -1;
 	Players[pnum].hostages_on_board = 0;
@@ -428,6 +722,7 @@ void init_player_stats_new_ship(ubyte pnum)
 	Players[pnum].secondary_ammo[0] = 2 + NDL - Difficulty_level;
 	Players[pnum].primary_weapon_flags = HAS_LASER_FLAG;
 	Players[pnum].secondary_weapon_flags = HAS_CONCUSSION_FLAG;
+	Players[pnum].afterburner_charge = 0;
 	Players[pnum].flags &= ~( PLAYER_FLAGS_QUAD_LASERS | PLAYER_FLAGS_AFTERBURNER | PLAYER_FLAGS_CLOAKED | PLAYER_FLAGS_INVULNERABLE | PLAYER_FLAGS_MAP_ALL | PLAYER_FLAGS_CONVERTER | PLAYER_FLAGS_AMMO_RACK | PLAYER_FLAGS_HEADLIGHT | PLAYER_FLAGS_HEADLIGHT_ON | PLAYER_FLAGS_FLAG);
 	Players[pnum].cloak_time = 0;
 	Players[pnum].invulnerable_time = 0;
@@ -437,11 +732,15 @@ void init_player_stats_new_ship(ubyte pnum)
 	VulcanBoxAmmo[pnum] = 0; 
 
 #ifdef NETWORK
-	if(Game_mode & GM_MULTI && Netgame.BornWithBurner) {
-		Players[pnum].flags |= PLAYER_FLAGS_AFTERBURNER; 
+	if(Game_mode & GM_MULTI && Netgame.BornWithBurner && !is_observer()) {
+		Players[pnum].flags |= PLAYER_FLAGS_AFTERBURNER;
+		Players[pnum].afterburner_charge = f1_0;
 	}
 #endif
 	digi_kill_sound_linked_to_object(Players[pnum].objnum);
+
+	if (pnum == Player_num && Game_mode & GM_MULTI)
+		multi_send_ship_status();
 }
 
 extern void init_stuck_objects(void);
@@ -516,6 +815,8 @@ void update_player_stats()
 //hack to not start object when loading level
 extern int Dont_start_sound_objects;
 
+#define SOUND_FAN 121 // the fan hum (eclip sound in the D1 and D2 data), played at 48.75% of the other wall sounds
+
 //go through this level and start any eclip sounds
 void set_sound_sources()
 {
@@ -555,7 +856,7 @@ void set_sound_sources()
 						}
 
 						compute_center_point_on_side(&pnt,seg,sidenum);
-						digi_link_sound_to_pos(sn,segnum,sidenum,&pnt,1, F1_0/2);
+						digi_link_sound_to_pos(sn,segnum,sidenum,&pnt,1, (sn == SOUND_FAN) ? fixmul(F1_0/2, fl2f(0.4875)) : F1_0/2);
 					}
 		}
 
@@ -686,6 +987,7 @@ void load_level_robots(int level_num)
 		Robot_replacements_loaded = 0;
 	}
 	load_robot_replacements(level_name);
+	Robot_replacements_loaded |= multi_change_weapon_info();
 	reload_previous_custom_polygon_models();
 }
 
@@ -697,6 +999,14 @@ void LoadLevel(int level_num,int page_in_textures)
 	int load_ret;
 
 	save_player = Players[Player_num];
+
+	if (Newdemo_state == ND_STATE_PLAYBACK && level_num == 0) {
+		// Workaround for Redux bug. We're hoping that the demo was recorded in a one-level
+		// mission; otherwise we don't have a good way to guess which one to load.
+		level_num = 1;
+		nm_messagebox(NULL, 1, TXT_OK, "This demo was recorded in\nan old version of D2X-Redux.\n"
+			"Some game information\nmay be missing.");
+	}
 
 	Assert(level_num <= Last_level  && level_num >= Last_secret_level  && level_num != 0);
 
@@ -737,8 +1047,12 @@ void LoadLevel(int level_num,int page_in_textures)
 		if (!load_exit_models())
 			endlevel_data_loaded = 0;
 
-	if ( page_in_textures )
+	if ( page_in_textures ) {
 		piggy_load_level_data();
+#ifdef OGL
+		ogl_cache_level_textures();
+#endif
+	}
 
 #ifdef RT_DX12
 	// Unload the previous level acceleration structure, if there is any
@@ -809,6 +1123,9 @@ void StartNewGame(int start_level)
 	Players[Player_num].starting_level = start_level;		// Mark where they started
 
 	game_disable_cheats();
+	// Brand new game: both clocks start clean and are shown green.
+	speedrun_new_game();
+
 
 	init_seismic_disturbances();
 }
@@ -960,15 +1277,16 @@ int p_secret_level_destroyed(void)
 #define TXT_SECRET_RETURN  "Returning to level %i", Entered_from_level
 #define TXT_SECRET_ADVANCE "Base level destroyed.\nAdvancing to level %i", Entered_from_level+1
 
-int draw_stars_bg(newmenu *menu, d_event *event, grs_bitmap *background)
+int draw_stars_bg(newmenu *menu, d_event *event, void *userdata)
 {
 	menu = menu;
-	
+	userdata = userdata;
+
 	switch (event->type)
 	{
 		case EVENT_WINDOW_DRAW:
 			gr_set_current_canvas(NULL);
-			show_fullscr(background);
+			nm_draw_background1(STARS_BACKGROUND); // same loader as the menus: 24-bit or own palette, game palette untouched
 			break;
 			
 		default:
@@ -981,24 +1299,16 @@ int draw_stars_bg(newmenu *menu, d_event *event, grs_bitmap *background)
 void do_screen_message(char *fmt, ...)
 {
 	va_list arglist;
-	grs_bitmap background;
 	char msg[1024];
-	
+
 	if (Game_mode & GM_MULTI)
 		return;
-	
-	gr_init_bitmap_data(&background);
-	if (pcx_read_bitmap(STARS_BACKGROUND, &background, BM_LINEAR, gr_palette) != PCX_ERROR_NONE)
-		return;
-
-	gr_palette_load(gr_palette);
 
 	va_start(arglist, fmt);
 	vsprintf(msg, fmt, arglist);
 	va_end(arglist);
-	
-	nm_messagebox1(NULL, (int (*)(newmenu *, d_event *, void *))draw_stars_bg, &background, 1, TXT_OK, msg);
-	gr_free_bitmap_data(&background);
+
+	nm_messagebox1(NULL, draw_stars_bg, NULL, 1, TXT_OK, msg);
 }
 
 //	-----------------------------------------------------------------------------------------------------
@@ -1008,6 +1318,7 @@ void do_screen_message(char *fmt, ...)
 //	robots, powerups, walls, doors, etc.
 void StartNewLevelSecret(int level_num, int page_in_textures)
 {
+	speedrun_transition_start();
         ThisLevelTime=0;
 
 	last_drawn_cockpit = -1;
@@ -1062,18 +1373,20 @@ void StartNewLevelSecret(int level_num, int page_in_textures)
 		init_morphs();
 		init_all_matcens();
 		reset_special_effects();
+		init_exploding_walls();
 		StartSecretLevel();
 	} else {
 		if (PHYSFSX_exists(SECRETC_FILENAME,0))
 		{
 			int	pw_save, sw_save;
 
-			pw_save = Primary_weapon;
-			sw_save = Secondary_weapon;
+			pw_save = Players[Player_num].primary_weapon;
+			sw_save = Players[Player_num].secondary_weapon;
 			state_restore_all(1, 1, SECRETC_FILENAME);
-			Primary_weapon = pw_save;
-			Secondary_weapon = sw_save;
+			Players[Player_num].primary_weapon = pw_save;
+			Players[Player_num].secondary_weapon = sw_save;
 			reset_special_effects();
+			init_exploding_walls();
 			StartSecretLevel();
 			// -- No: This is only for returning to base level: set_pos_from_return_segment();
 		} else {
@@ -1115,11 +1428,11 @@ void ExitSecretLevel(void)
 		int	pw_save, sw_save;
 
 		do_screen_message(TXT_SECRET_RETURN);
-		pw_save = Primary_weapon;
-		sw_save = Secondary_weapon;
+		pw_save = Players[Player_num].primary_weapon;
+		sw_save = Players[Player_num].secondary_weapon;
 		state_restore_all(1, 1, SECRETB_FILENAME);
-		Primary_weapon = pw_save;
-		Secondary_weapon = sw_save;
+		Players[Player_num].primary_weapon = pw_save;
+		Players[Player_num].secondary_weapon = sw_save;
 	} else {
 		// File doesn't exist, so can't return to base level.  Advance to next one.
 		if (Entered_from_level == Last_level)
@@ -1213,6 +1526,10 @@ void EnterSecretLevel(void)
 void PlayerFinishedLevel(int secret_flag)
 {
 	Assert(!secret_flag);
+	// Count RTA through the full transition, until the next level starts.
+	speedrun_level_finished();
+
+
 
 	if (Game_wind)
 		window_set_visible(Game_wind, 0);
@@ -1221,7 +1538,9 @@ void PlayerFinishedLevel(int secret_flag)
 	Players[Player_num].hostages_rescued_total += Players[Player_num].hostages_on_board;
 
 	if (Game_mode & GM_NETWORK)
+	{
 		Players[Player_num].connected = CONNECT_WAITING; // Finished but did not die
+	}
 
 	last_drawn_cockpit = -1;
 
@@ -1249,8 +1568,10 @@ void show_order_form();
 //called when the player has finished the last level
 void DoEndGame(void)
 {
+	speedrun_transition_stop();
+
 	if ((Newdemo_state == ND_STATE_RECORDING) || (Newdemo_state == ND_STATE_PAUSED))
-		newdemo_stop_recording();
+		newdemo_stop_recording(0);
 
 	set_screen_mode( SCREEN_MENU );
 
@@ -1376,6 +1697,8 @@ void DoPlayerDead()
 	}
 #endif
 
+	reset_auto_select();
+
 	if (Game_wind && cycle_window_vis)
 		window_set_visible(Game_wind, 0);
 
@@ -1469,8 +1792,10 @@ void DoPlayerDead()
 			}
 		}
 	} else {
+		fix cruise = Cruise_speed; // respawn keeps cruise control as it was at death (StartLevel resets it)
 		init_player_stats_new_ship(Player_num);
 		StartLevel(1);
+		Cruise_speed = cruise;
 	}
 
 	digi_sync_sounds();
@@ -1491,6 +1816,16 @@ void StartNewLevelSub(int level_num, int page_in_textures, int secret_flag)
 	}
    BigWindowSwitch=0;
 
+	if (GameArg.GameLogSplit) {
+		// Include the mission name, level number and timestamp in the log filename
+		char log_filename[PATH_MAX];
+		time_t now = time(NULL);
+		struct tm *t = localtime(&now);
+		snprintf(log_filename, SDL_arraysize(log_filename), "gamelog-%s-%d-%04d%02d%02d-%02d%02d%02d.txt",
+			Current_mission_filename, level_num, t->tm_year + 1900, t->tm_mon, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+
+		con_switch_log(log_filename);
+	}
 
 	if (Newdemo_state == ND_STATE_PAUSED)
 		Newdemo_state = ND_STATE_RECORDING;
@@ -1519,6 +1854,17 @@ void StartNewLevelSub(int level_num, int page_in_textures, int secret_flag)
 		{
 			songs_play_song( SONG_TITLE, 1 ); // level song already plays but we fail to start level...
 			return;
+		}
+
+		// Reset the timestamp when we can send another ship status packet (for observer mode)
+		Next_ship_status_time = GameTime64;
+
+		if (imulti_new_game)
+		{
+			for (int i = 0; i < MAX_PLAYERS; i++)
+			{
+				init_player_stats_new_ship(i);
+			}
 		}
 	}
 #endif
@@ -1572,10 +1918,10 @@ void StartNewLevelSub(int level_num, int page_in_textures, int secret_flag)
 		read_player_file();		//get window sizes
 
 	reset_special_effects();
+	init_exploding_walls();
 
 #ifdef OGL
 	gr_remap_mono_fonts();
-	ogl_cache_level_textures();
 #endif
 
 
@@ -1592,6 +1938,10 @@ void StartNewLevelSub(int level_num, int page_in_textures, int secret_flag)
 	copy_defaults_to_robot_all();
 	init_controlcen_for_level();
 
+	reset_respawnable_bots();
+
+	set_homing_update_rate(Game_mode & GM_MULTI ? Netgame.HomingUpdateRate : 25);
+
 	//	Say player can use FLASH cheat to mark path to exit.
 	Last_level_path_created = -1;
 
@@ -1599,6 +1949,13 @@ void StartNewLevelSub(int level_num, int page_in_textures, int secret_flag)
 	// Also takes care of nm_draw_background() possibly being called
 	if (!((Game_mode & GM_MULTI) && (Newdemo_state != ND_STATE_PLAYBACK)))
 		full_palette_save();
+
+	int autodemo_enabled_for_game_mode =
+		(!(Game_mode & GM_MULTI) && PlayerCfg.AutoDemoSp) ||
+		((Game_mode & GM_MULTI) && PlayerCfg.AutoDemoMp);
+	if (autodemo_enabled_for_game_mode && Newdemo_state != ND_STATE_RECORDING) {
+		newdemo_start_recording(1);
+	}
 
 	if (!Game_wind)
 		game();
@@ -1720,6 +2077,7 @@ void maybe_set_first_secret_visit(int level_num)
 //	secret_flag if came from a secret level
 void StartNewLevel(int level_num)
 {
+	speedrun_transition_start();
 	hide_menus();
 
 	GameTime64 = 0;
@@ -1742,7 +2100,12 @@ void InitPlayerPosition(int random_flag)
 {
 	int NewPlayer=0;
 
-	if (! ((Game_mode & GM_MULTI) && !(Game_mode&GM_MULTI_COOP)) ) // If not deathmatch
+	// Our own ship: it may still point at object 0 (the host's ship) from the level setup
+	ConsoleObject = &Objects[Players[Player_num].objnum];
+
+	if (is_observer())
+		NewPlayer = 0;
+	else if (! ((Game_mode & GM_MULTI) && !(Game_mode&GM_MULTI_COOP)) ) // If not deathmatch
 		NewPlayer = Player_num;
 #ifdef NETWORK	
 	else if ((Game_mode & GM_MULTI) && (Netgame.SpawnStyle == SPAWN_STYLE_PREVIEW) && Dead_player_camera != NULL)
@@ -1755,6 +2118,49 @@ void InitPlayerPosition(int random_flag)
 
 		timer_update();
 		d_srand((fix)timer_query());
+#ifdef NETWORK
+		if ((Game_mode & GM_NETWORK) && Netgame.NewSpawnAlgorithm)
+		{
+			// Pick the spawn whose nearest active player is farthest away.
+			int first_candidate = d_rand() % NumNetPlayerPositions;
+			fix best_dist = -1;
+
+			NewPlayer = first_candidate;
+			for (int candidate = 0; candidate < NumNetPlayerPositions; candidate++)
+			{
+				int spawn = (first_candidate + candidate) % NumNetPlayerPositions;
+				int has_connected_player = 0;
+				fix nearest_dist = 0x7fffffff;
+
+				for (i = 0; i < N_players; i++)
+				{
+					if (i == Player_num || Players[i].connected == CONNECT_DISCONNECTED ||
+						Objects[Players[i].objnum].type != OBJ_PLAYER)
+						continue;
+
+					dist = find_connected_distance(&Objects[Players[i].objnum].pos,
+						Objects[Players[i].objnum].segnum, &Player_init[spawn].pos,
+						Player_init[spawn].segnum, 15, WID_FLY_FLAG);
+					if (dist >= 0)
+					{
+						has_connected_player = 1;
+						if (dist < nearest_dist)
+							nearest_dist = dist;
+					}
+				}
+
+				if (!has_connected_player)
+					nearest_dist = 0;
+
+				if (nearest_dist > best_dist)
+				{
+					best_dist = nearest_dist;
+					NewPlayer = spawn;
+				}
+			}
+		}
+		else
+#endif
 		do {
 			trys++;
 			NewPlayer = d_rand() % NumNetPlayerPositions;
@@ -1787,8 +2193,14 @@ void InitPlayerPosition(int random_flag)
 		ConsoleObject->orient = Dead_player_camera->orient;  
 		Dead_player_camera = NULL; 
 	}
-#endif		
-	obj_relink(ConsoleObject-Objects,Player_init[NewPlayer].segnum);
+
+	if (is_observer()) {
+		ConsoleObject->pos = Objects[Players[Current_obs_player].objnum].pos;
+		ConsoleObject->orient = Objects[Players[Current_obs_player].objnum].orient;
+		obj_relink_all();
+	} else
+#endif
+		obj_relink(ConsoleObject-Objects,Player_init[NewPlayer].segnum);
 	reset_player_object();
 	reset_cruise();
 }
@@ -1864,7 +2276,7 @@ void StartLevel(int random_flag)
 
 	if (Game_mode & GM_MULTI)
 	{
-		if (Game_mode & GM_MULTI_COOP)
+		if ((Game_mode & GM_MULTI_COOP) || (Game_mode & GM_MULTI_ROBOTS))
 			multi_send_score();
 	 	multi_send_reappear();
 		multi_do_protocol_frame(1, 1);

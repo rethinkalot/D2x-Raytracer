@@ -29,7 +29,7 @@ char copyright[] = "DESCENT II  COPYRIGHT (C) 1994-1996 PARALLAX SOFTWARE CORPOR
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
-#include <SDL/SDL.h>
+#include <SDL.h>
 
 #ifdef __unix__
 #include <unistd.h>
@@ -77,9 +77,7 @@ char copyright[] = "DESCENT II  COPYRIGHT (C) 1994-1996 PARALLAX SOFTWARE CORPOR
 #include "../texmap/scanline.h" //for select_tmap -MM
 #include "event.h"
 #include "rbaudio.h"
-#ifndef __LINUX__
 #include "messagebox.h"
-#endif
 #ifdef EDITOR
 #include "editor/editor.h"
 #include "editor/kdefs.h"
@@ -88,6 +86,12 @@ char copyright[] = "DESCENT II  COPYRIGHT (C) 1994-1996 PARALLAX SOFTWARE CORPOR
 #include "vers_id.h"
 #ifdef USE_UDP
 #include "net_udp.h"
+#endif
+#ifdef _WIN32
+#include <windows.h>
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
 #endif
 
 #if defined(RT_DX12)
@@ -128,6 +132,7 @@ void print_commandline_help()
 	printf( "  -window                       Run the game in a window\n");
 	printf( "  -noborders                    Do not show borders in window mode\n");
 	printf( "  -nomovies                     Don't play movies\n");
+	printf( "  -notitles                     Skip title screens\n");
 
 	printf( "\n Controls:\n\n");
 	printf( "  -nocursor                     Hide mouse cursor\n");
@@ -154,8 +159,10 @@ void print_commandline_help()
 #if defined(USE_UDP)
 	printf( "\n Multiplayer:\n\n");
 	printf( "  -udp_hostaddr <s>             Use IP address/Hostname <s> for manual game joining\n\t\t\t\t(default: %s)\n", UDP_MANUAL_ADDR_DEFAULT);
-	printf( "  -udp_hostport <n>             Use UDP port <n> for manual game joining (default: %i)\n", UDP_PORT_DEFAULT);
-	printf( "  -udp_myport <n>               Set my own UDP port to <n> (default: %i)\n", UDP_PORT_DEFAULT);
+	printf( "  -udp_gameport <n>             Search for games on UDP port <n>; Join Manually's game port\n\t\t\t\t(default: %i; a port typed in Join Manually is kept)\n", UDP_PORT_DEFAULT);
+	printf( "  -udp_hostport <n>             Host games on UDP port <n> (default: %i)\n", UDP_PORT_DEFAULT);
+	printf( "  -udp_myport <n>               Join games from UDP port <n> (default: %i)\n", UDP_PORT_DEFAULT);
+	printf( "  -slikenet_nolink              Test switch: refuse every SLikeNet peer link, so the\n\t\t\t\tother players report Link Failure (game still runs on plain UDP)\n");
 #ifdef USE_TRACKER
 	printf( "  -tracker_hostaddr <n>         Address of Tracker server to register/query games to/from\n\t\t\t\t(default: %s)\n", TRACKER_ADDR_DEFAULT);
 	printf( "  -tracker_hostport <n>         Port of Tracker server to register/query games to/from\n\t\t\t\t(default: %i)\n", TRACKER_PORT_DEFAULT);
@@ -302,6 +309,25 @@ int standard_handler(d_event *event)
 	return 0;
 }
 
+// Use SEH for catching exceptions on Windows, this is needed because of the SDL parachute
+// But only on MSVC/64-bit clang (SEH is broken on 32-bit clang https://github.com/llvm/llvm-project/issues/25753)
+#if defined(WIN32) && (defined(_MSC_VER) || (defined(__clang__) && !defined(__i386__)))
+int inner_main(int argc, char *argv[]);
+LONG WINAPI win32_exception_handler(EXCEPTION_POINTERS* exceptionPointers);
+
+int main(int argc, char *argv[])
+{
+	__try {
+		return inner_main(argc, argv);
+	} __except (win32_exception_handler(GetExceptionInformation())) {
+		return 1;
+	}
+}
+
+#undef main
+#define main inner_main
+#endif
+
 jmp_buf LeaveEvents;
 #define PROGNAME argv[0]
 
@@ -311,21 +337,43 @@ jmp_buf LeaveEvents;
 int main(int argc, char *argv[])
 {
 	mem_init();
-#ifdef __LINUX__
-	error_init(NULL);
-#else
 	error_init(msgbox_error);
 	set_warn_func(msgbox_warning);
-#endif
 	PHYSFSX_init(argc, argv);
 	//RT_LOG_INIT(RT_FILTERFLAG_ALL);
 	con_init();  // Initialise the console
+#if defined(_WIN32) && !(defined(_MSC_VER) || (defined(__clang__) && !defined(__i386__)))
+	{
+		// MinGW has no __try: catch crashes this way, so they're written to the gamelog (arch/win32/crashdump.c)
+		LONG WINAPI win32_exception_handler(EXCEPTION_POINTERS* exceptionPointers);
+		SetUnhandledExceptionFilter(win32_exception_handler);
+	}
+#endif
 
 	setbuf(stdout, NULL); // unbuffered output via printf
 #ifndef SHIPPING_BUILD
 #ifdef _WIN32
-	freopen( "CON", "w", stdout );
-	freopen( "CON", "w", stderr );
+	if (GameArg.SysShowCmdHelp || GameArg.DbgVerbose >= CON_VERBOSE)
+	{
+		if (AllocConsole())
+		{
+			HANDLE hOut;
+			DWORD mode;
+
+			freopen("CONOUT$", "w", stdout);
+			freopen("CONOUT$", "w", stderr);
+			freopen("CONIN$", "r", stdin);
+
+			hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+			if (hOut != INVALID_HANDLE_VALUE && GetConsoleMode(hOut, &mode))
+				SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+		}
+	}
+	else
+	{
+		freopen("NUL", "w", stdout);
+		freopen("NUL", "w", stderr);
+	}
 #endif
 #endif //SHIPPING_BUILD
 	if (GameArg.SysShowCmdHelp) {
@@ -341,17 +389,28 @@ int main(int argc, char *argv[])
 	if (!PHYSFSX_checkSupportedArchiveTypes())
 		return(0);
 
-	if (! PHYSFSX_contfile_init("descent2.hog", 1)) {
-		if (! PHYSFSX_contfile_init("d2demo.hog", 1))
+	if (! PHYSFSX_contfile_init("descent2.hog", 1) &&
+		! PHYSFSX_contfile_init("d2demo.hog", 1)) {
+		char path[PATH_MAX];
+		snprintf(path, sizeof(path), "%s", PHYSFS_getWriteDir());
+		size_t len = strlen(path);
+		if (len >= 3 && (strcmp(path + len - 3, "\\.\\") == 0 || strcmp(path + len - 3, "/./") == 0))
+			path[len - 3] = 0;
+		else if (len && (path[len - 1] == '/' || path[len - 1] == '\\'))
+			path[len - 1] = 0;
 #define DXX_NAME_NUMBER	"2"
 #define DXX_HOGFILE_NAMES	"descent2.hog or d2demo.hog"
-#if defined(__unix__) && !defined(__APPLE__)
+#if defined(__APPLE__)
 #define DXX_HOGFILE_PROGRAM_DATA_DIRECTORY	\
-			      "\t$HOME/.d" DXX_NAME_NUMBER "x-raytracer\n"	\
+			      "\t%s\n" \
+			      "\tDirectory containing D" DXX_NAME_NUMBER "X-Redux\n"
+#elif defined(__unix__)
+#define DXX_HOGFILE_PROGRAM_DATA_DIRECTORY	\
+			      "\t%s\n"	\
 			      "\t" SHAREPATH "\n"
-#else
+#else // Windows
 #define DXX_HOGFILE_PROGRAM_DATA_DIRECTORY	\
-				  "\tDirectory containing D" DXX_NAME_NUMBER "X\n"
+			      "\t%s\n"
 #endif
 #if (defined(__APPLE__) && defined(__MACH__)) || defined(macintosh)
 #define DXX_HOGFILE_APPLICATION_BUNDLE	\
@@ -365,7 +424,7 @@ int main(int argc, char *argv[])
 		"\tIn a subdirectory called 'Data'\n"	\
 		DXX_HOGFILE_APPLICATION_BUNDLE	\
 		"Or use the -hogdir option to specify an alternate location."
-		Error(DXX_MISSING_HOGFILE_ERROR_TEXT);
+		Error(DXX_MISSING_HOGFILE_ERROR_TEXT, path);
 	}
 
 	load_text();
@@ -390,6 +449,7 @@ int main(int argc, char *argv[])
 	Lighting_on = 1;
 
 	con_printf(CON_VERBOSE, "Going into graphics mode...\n");
+	res_startup_check(); // a saved resolution far bigger than the monitor starts at 960x540 instead
 	gr_set_mode(Game_screen_mode);
 
 	// Load the palette stuff. Returns non-zero if error.
@@ -409,6 +469,7 @@ int main(int argc, char *argv[])
 		show_titles();
 #endif
 	set_screen_mode(SCREEN_MENU);
+	res_startup_ask(); // ...and asks here whether to go back to it
 
 	con_printf( CON_DEBUG, "\nDoing gamedata_init..." );
 	gamedata_init();
@@ -632,6 +693,7 @@ int main(int argc, char *argv[])
 	newmenu_free_background();
 	free_mission();
 	PHYSFSX_removeArchiveContent();
+	reset_observatory_stats();
 
 	return(0);		//presumably successful exit
 }

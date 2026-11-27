@@ -28,5 +28,8 @@ void timer_update();
 fix64 timer_query();
 void timer_delay(fix seconds);
 void timer_delay2(int fps);
+fix64 timer_query_perf(void);
+void timer_delay_ms(int ms);
+void timer_set_high_res(void);
 
 #endif

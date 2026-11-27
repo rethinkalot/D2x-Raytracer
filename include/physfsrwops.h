@@ -28,7 +28,11 @@
 #else
 #include <physfs/physfs.h>
 #endif
-#include <SDL/SDL.h>
+#include <SDL.h>
+
+#ifdef _MSC_VER
+#define __EXPORT__ __declspec(dllexport)
+#endif
 
 #ifdef __cplusplus
 extern "C" {

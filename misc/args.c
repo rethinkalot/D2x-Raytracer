@@ -19,7 +19,7 @@ COPYRIGHT 1993-1998 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #include <stdlib.h>
 #include <string.h>
-#include <SDL/SDL_stdinc.h>
+#include <SDL_stdinc.h>
 #include "physfsx.h"
 #include "args.h"
 #include "u_mem.h"
@@ -150,6 +150,7 @@ void ReadCmdArgs(void)
 	GameArg.SysNoBorders 		= FindArg("-noborders");
 	GameArg.SysNoTitles			= GameArg.SysOpenVR || FindArg("-notitles");
 	GameArg.SysNoMovies 		= FindArg("-nomovies");
+	GameArg.SysNoTitles 		= FindArg("-notitles");
 	GameArg.SysAutoDemo 		= FindArg("-autodemo");
 
 	// Control Options
@@ -194,6 +195,8 @@ void ReadCmdArgs(void)
 	GameArg.MplUdpHostAddr		= get_str_arg("-udp_hostaddr", UDP_MANUAL_ADDR_DEFAULT);
 	GameArg.MplUdpHostPort		= get_int_arg("-udp_hostport", 0);
 	GameArg.MplUdpMyPort		= get_int_arg("-udp_myport", 0);
+	GameArg.MplUdpGamePort		= get_int_arg("-udp_gameport", 0);
+	GameArg.MplSlikenetNoLink	= FindArg("-slikenet_nolink");
 #ifdef USE_TRACKER
 	GameArg.MplTrackerAddr		= get_str_arg("-tracker_hostaddr", TRACKER_ADDR_DEFAULT);
 	GameArg.MplTrackerPort		= get_int_arg("-tracker_hostport", TRACKER_PORT_DEFAULT);
@@ -216,6 +219,8 @@ void ReadCmdArgs(void)
 		GameArg.DbgVerbose = CON_VERBOSE;
 	else
 		GameArg.DbgVerbose = CON_NORMAL;
+
+	GameArg.DbgVerboseGiven = (FindArg("-verbose") != 0);
 
 	GameArg.DbgSafelog 		= FindArg("-safelog");
 	GameArg.DbgNoRun 		= FindArg("-norun");
@@ -240,6 +245,10 @@ void ReadCmdArgs(void)
 #endif
 
 	GameArg.LogNetTraffic 		= FindArg("-netlog");
+
+	GameArg.GameLogTimeStamp	= FindArg("-gamelog_timestamp");
+	GameArg.GameLogSplit		= FindArg("-gamelog_split");
+	GameArg.DemoLog		= FindArg("-demolog");
 }
 
 void args_exit(void)

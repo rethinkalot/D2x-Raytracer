@@ -69,6 +69,8 @@ typedef struct Arg
 	const char *MplUdpHostAddr;
 	int MplUdpHostPort;
 	int MplUdpMyPort;
+	int MplUdpGamePort;
+	int MplSlikenetNoLink;
 #ifdef USE_TRACKER
 	const char *MplTrackerAddr;
 	int MplTrackerPort;
@@ -77,6 +79,7 @@ typedef struct Arg
 	int EdiSaveHoardData;
 	int EdiMacData; // also used for some read routines in non-editor build
 	int DbgVerbose;
+	int DbgVerboseGiven;	// -verbose: event, input and window diagnostics
 	int DbgSafelog;
 	int DbgNoRun;
 	int DbgRenderStats;
@@ -98,6 +101,9 @@ typedef struct Arg
 	int DbgSdlASyncBlit;
 #endif
 	int LogNetTraffic; 	
+	int GameLogTimeStamp;
+	int GameLogSplit;
+	int DemoLog;
 } Arg;
 
 extern struct Arg GameArg;

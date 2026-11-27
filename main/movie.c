@@ -29,6 +29,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include <ctype.h>
 
 #include "movie.h"
+#include "gameseq.h"
 #include "window.h"
 #include "console.h"
 #include "config.h"
@@ -47,6 +48,8 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "menu.h"
 #include "libmve.h"
 #include "text.h"
+
+extern void show_speedrun_timers(void);
 #include "screens.h"
 #include "physfsrwops.h"
 #ifdef OGL
@@ -328,6 +331,10 @@ int MovieHandler(window *wind, d_event *event, movie *m)
 			break;
 
 		case EVENT_WINDOW_DRAW:
+			// Movie playback has its own event loop, so the normal game-window
+			// callback cannot advance or draw the speedrun clocks here. Keep IGT
+			// live and draw its HUD readout over each movie frame when enabled.
+			speedrun_transition_tick();
 			gr_setcolor(BM_XRGB(0, 0, 0));
 			gr_urect(0, 0, SWIDTH, SHEIGHT);
 
@@ -342,6 +349,7 @@ int MovieHandler(window *wind, d_event *event, movie *m)
 			}
 
 			draw_subtitles(m->frame_num);
+			show_speedrun_timers();
 
 			gr_palette_load(gr_palette);
 
@@ -397,6 +405,13 @@ int RunMovie(char *filename, int hires_flag, int must_have,int dx,int dy)
 	// Open Movie file.  If it doesn't exist, no movie, just return.
 
 	filehndl = PHYSFSRWOPS_openRead(filename);
+
+	if (!filehndl && strlen(filename) < 13) {
+		char buf[13];
+		strcpy(buf, filename);
+		d_strupr(buf);
+		filehndl = PHYSFSRWOPS_openRead(buf);
+	}
 
 	if (!filehndl)
 	{
@@ -511,6 +526,13 @@ int InitRobotMovie(char *filename)
 	MVE_sndInit(-1);        //tell movies to play no sound for robots
 
 	RoboFile = PHYSFSRWOPS_openRead(filename);
+
+	if (!RoboFile && strlen(filename) < 13) {
+		char buf[13];
+		strcpy(buf, filename);
+		d_strupr(buf);
+		RoboFile = PHYSFSRWOPS_openRead(buf);
+	}
 
 	if (!RoboFile)
 	{

@@ -60,9 +60,9 @@ extern int multi_protocol; // set and determinate used protocol
 #define MULTI_PROTO_UDP 1 // UDP protocol
 
 // What version of the multiplayer protocol is this? Increment each time something drastic changes in Multiplayer without the version number changes. Can be reset to 0 each time the version of the game changes
-// 4001: DMAX 11 adds MULTI_DMAX_SHIELDS. Older builds would drop the rest of
-// any packet containing it, so mixed versions must not join the same game.
-#define MULTI_PROTO_VERSION 4001 // Raytracer
+// 30106: D2X Raytracer = Redux 1.1 + SLikeNet (30006) + DMAX MULTI_DMAX_SHIELDS.
+// D2s builds would drop the rest of any packet holding MULTI_DMAX_SHIELDS, so they must not mix.
+#define MULTI_PROTO_VERSION 30106
 
 // PROTOCOL VARIABLES AND DEFINES - END
 
@@ -79,17 +79,20 @@ extern int multi_protocol; // set and determinate used protocol
 	VALUE(MULTI_KILL                  , 5)	\
 	VALUE(MULTI_REMOVE_OBJECT         , 5)	\
 	VALUE(MULTI_MESSAGE               , 37)	/* (MAX_MESSAGE_LENGTH = 40) */	\
+	VALUE(MULTI_OBS_MESSAGE           , 47)	\
 	VALUE(MULTI_QUIT                  , 2)	\
 	VALUE(MULTI_PLAY_SOUND            , 4)	\
 	VALUE(MULTI_CONTROLCEN           , 4)	\
 	VALUE(MULTI_ROBOT_CLAIM          , 5)	\
 	VALUE(MULTI_END_SYNC             , 4)	\
 	VALUE(MULTI_CLOAK                , 2)	\
+	VALUE(MULTI_INVULN               , 2)	\
 	VALUE(MULTI_ENDLEVEL_START       , 3)	\
 	VALUE(MULTI_CREATE_EXPLOSION     , 2)	\
 	VALUE(MULTI_CONTROLCEN_FIRE      , 16)	\
 	VALUE(MULTI_CREATE_POWERUP       , 19)	\
 	VALUE(MULTI_DECLOAK              , 2)	\
+	VALUE(MULTI_DEINVULN             , 2)	\
 	VALUE(MULTI_MENU_CHOICE          , 2)	\
 	VALUE(MULTI_ROBOT_POSITION       , 5+sizeof(shortpos))	\
 	VALUE(MULTI_PLAYER_EXPLODE        , 97+9)	\
@@ -139,13 +142,20 @@ extern int multi_protocol; // set and determinate used protocol
 	VALUE(MULTI_GOT_ORB              , 2)	\
 	VALUE(MULTI_DROP_ORB             , 12)	\
 	VALUE(MULTI_PLAY_BY_PLAY         , 4)	\
+	VALUE(MULTI_RESPAWN_ROBOT        , 60)	\
+	VALUE(MULTI_OBS_UPDATE           , 4 + 8*MAX_OBSERVERS)	\
+	VALUE(MULTI_DAMAGE               , 14)  \
+	VALUE(MULTI_REPAIR               , 11)  \
+	VALUE(MULTI_SHIP_STATUS          , 44)  \
+	VALUE(MULTI_CREATE_EXPLOSION2    , 24)  \
+	VALUE(MULTI_CHANGE_MAP           , 13)  /* host's Change Map: pnum, mission file name (9), level, change id */ \
 	VALUE(MULTI_DMAX_SHIELDS         , 9)	/* shields + invulnerability for shield bubbles */	\
 	AFTER
 for_each_multiplayer_command(enum {, define_multiplayer_command, });
 
 #define MAX_NET_CREATE_OBJECTS  40
 
-#define MAX_MULTI_MESSAGE_LEN   120
+#define MAX_MULTI_MESSAGE_LEN   (4 + 8*MAX_OBSERVERS)
 
 #define NETGAME_ANARCHY         0
 #define NETGAME_TEAM_ANARCHY    1
@@ -231,11 +241,16 @@ enum { for_each_netflag_value(define_netflag_bit_mask) };
 enum { NETFLAG_DOPOWERUP = 0 for_each_netflag_value(define_netflag_powerup_mask) };
 
 #define MULTI_GAME_TYPE_COUNT	8
+#define MULTI_PDATA_SEQUENCE_MODULO 128
 #define MULTI_GAME_NAME_LENGTH	17
 #define MULTI_ALLOW_POWERUP_MAX 27
 extern char *multi_allow_powerup_text[MULTI_ALLOW_POWERUP_MAX];
 extern const char GMNames[MULTI_GAME_TYPE_COUNT][MULTI_GAME_NAME_LENGTH];
 extern const char GMNamesShrt[MULTI_GAME_TYPE_COUNT][8];
+
+extern int Current_obs_player; // Current player being observed.
+extern bool Obs_at_distance; // True if you're viewing the player from a cube back.
+extern int imulti_new_game; // True if we're starting a new game.
 
 // Exported functions
 
@@ -262,6 +277,8 @@ void multi_send_destroy_controlcen(int objnum, int player);
 void multi_send_endlevel_start(int);
 void multi_send_player_explode(char type);
 void multi_send_message(void);
+void multi_send_system_message(const char *message);
+void multi_send_obs_message(void);
 void multi_send_position(int objnum);
 void multi_send_reappear();
 void multi_send_kill(int objnum);
@@ -272,6 +289,7 @@ void multi_send_create_explosion(int player_num);
 void multi_send_controlcen_fire(vms_vector *to_target, int gun_num, int objnum);
 void multi_send_cloak(void);
 void multi_send_decloak(void);
+void multi_send_invuln(void);
 void multi_send_create_powerup(int powerup_type, int segnum, int objnum, vms_vector *pos);
 void multi_send_play_sound(int sound_num, fix volume);
 void multi_send_audio_taunt(int taunt_num);
@@ -282,6 +300,16 @@ void multi_send_drop_weapon (int objnum,int seed);
 void multi_send_drop_marker (int player,vms_vector position,char messagenum,char text[]);
 void multi_send_markers();
 void multi_send_guided_info (object *miss,char);
+void multi_send_damage(fix damage, fix shields, ubyte killer_type, ubyte killer_id, ubyte damage_type, object* source);
+void multi_do_damage( const ubyte *buf );
+void multi_send_repair(fix repair, fix shields, ubyte sourcetype);
+void multi_do_repair(const ubyte *buf);
+void multi_send_ship_status();
+void multi_do_ship_status( const ubyte *buf );
+extern fix Multi_omega_charge[MAX_PLAYERS]; // observed players' Omega charge, from MULTI_SHIP_STATUS
+void multi_send_create_explosion2(int segnum, vms_vector *pos, fix size, int type);
+void multi_do_create_explosion2( const ubyte *buf );
+
 void multi_send_bounty( void );
 
 void multi_endlevel_score(void);
@@ -292,6 +320,12 @@ int multi_endlevel(int *secret);
 int multi_endlevel_poll1(newmenu *menu, d_event *event, void *userdata);
 int multi_endlevel_poll2( newmenu *menu, d_event *event, void *userdata );
 void multi_send_endlevel_packet();
+// Smoothed remote ship rendering.  Remote ship history used to draw a ship
+// between two updates that were actually received; see multi.c.
+void multi_interp_clear(void);
+void multi_interp_push_position(int pnum, const object *obj, ubyte sequence, int has_sequence);
+void multi_interp_update_remote(void);
+
 void multi_leave_game(void);
 void multi_process_data(const ubyte *dat, int len);
 void multi_process_bigdata(const ubyte *buf, unsigned len);
@@ -307,15 +341,30 @@ int multi_get_kill_list(int *plist);
 void multi_new_game(void);
 void multi_sort_kill_list(void);
 void multi_reset_stuff(void);
-void multi_send_data(const ubyte *buf, int len, int priority);
+void multi_send_data(unsigned char *buf, int len, int priority);
+void multi_send_obs_data(unsigned char* buf, int len);
 int get_team(int pnum);
+int get_team_size(int team_num);
 int multi_maybe_disable_friendly_fire(object *killer);
 void multi_initiate_save_game();
 void multi_initiate_restore_game();
 void multi_disconnect_player(int pnum);
 void multi_object_to_object_rw(object *obj, object_rw *obj_rw);
 void multi_object_rw_to_object(object_rw *obj_rw, object *obj);
-
+int get_color_for_player(int id, int missile);
+int get_color_for_team(int team);
+void multi_reset_object_texture(object* objp);
+void multi_send_obs_update(ubyte event, ubyte event_data);
+// Host "Change Map" from the in-game Esc menu
+void multi_change_map_start(void);
+int multi_change_map_frame(void);
+int multi_change_map_busy(void);
+void multi_change_map_reset(void);
+void multi_do_change_map(const ubyte *buf);
+void multi_send_ship_status_for_frame();
+bool is_observing_player();
+bool object_is_observer(object* obj);
+int get_observer_game_mode();
 
 // Exported variables
 
@@ -369,11 +418,13 @@ extern int multi_powerup_is_4pack(int);
 extern void multi_send_orb_bonus( char pnum );
 extern void multi_send_got_orb( char pnum );
 extern void multi_add_lifetime_kills(void);
+extern int multi_change_weapon_info(void);
 
 extern int PhallicLimit,PhallicMan;
 extern int Bounty_target;
 
 extern bitmap_index multi_player_textures[MAX_PLAYERS][N_PLAYER_SHIP_TEXTURES];
+extern ubyte multi_player_tex_color[MAX_PLAYERS];
 
 extern const char *const RankStrings[10];
 extern char PowerupsInMine[MAX_POWERUP_TYPES],
@@ -391,6 +442,7 @@ extern fix64 RefuseTimeLimit;
 #define NETGAME_FLAG_TEAM_HOARD         16
 #define NETGAME_FLAG_REALLY_ENDLEVEL    32
 #define NETGAME_FLAG_REALLY_FORMING     64
+#define NETGAME_FLAG_CTF_BASE           128 // CTF: an own dropped flag touched goes home, a new flag after a score appears in its goal
 
 #define NETGAME_NAME_LEN                15
 #define NETGAME_AUX_SIZE                20  // Amount of extra data for the network protocol to store in the netgame packet
@@ -400,6 +452,9 @@ extern struct AllNetPlayers_info NetPlayers;
 
 extern int multi_received_objects; 
 
+extern ubyte Send_ship_status; // Whether we owe observers a ship status packet.
+extern fix64 Next_ship_status_time; // The next time we are allowed to send a ship status.
+
 int multi_i_am_master(void);
 int multi_who_is_master(void);
 void change_playernum_to(int new_pnum);
@@ -407,7 +462,7 @@ void change_playernum_to(int new_pnum);
 // Multiplayer powerup capping
 extern void multi_powcap_count_powerups_in_mine(void);
 extern void multi_powcap_cap_objects();
-extern void multi_do_powcap_update();
+extern void multi_do_powcap_update(const ubyte *buf);
 extern void multi_send_powcap_update();
 extern void multi_send_stolen_items();
 extern void multi_send_kill_goal_counts();
@@ -449,6 +504,7 @@ typedef struct netplayer_info
 	ubyte						rank;
 	ubyte						color;
 	ubyte						missilecolor;
+	ubyte						observer;
 	fix							ping;
 	ubyte						loss; 
 	ubyte						rx_loss; 
@@ -477,6 +533,7 @@ typedef struct netgame_info
 	} protocol;	
 #endif
 	struct netplayer_info 				players[MAX_PLAYERS+4];
+	struct netplayer_info 				observers[MAX_OBSERVERS];
 	char    					game_name[NETGAME_NAME_LEN+1];
 	char    					mission_title[MISSION_NAME_LEN+1];
 	char    					mission_name[9];
@@ -486,7 +543,12 @@ typedef struct netgame_info
 	ubyte   					difficulty;
 	ubyte   					game_status;
 	ubyte   					numplayers;
+	ubyte						numobservers;
 	ubyte   					max_numplayers;
+	ubyte   					max_numobservers;
+	ubyte   					obs_delay;
+	ubyte						obs_min;
+	ubyte						host_is_obs;
 	ubyte   					numconnected;
 	ubyte   					game_flags;
 	ubyte   					team_vector;
@@ -533,5 +595,173 @@ typedef struct netgame_info
 #ifdef USE_TRACKER
 	ubyte						Tracker;
 #endif
+	ubyte						HomingUpdateRate;
+	ubyte						RemoteHitSpark;
+	ubyte						AllowCustomModelsTextures;
+	ubyte						ReducedFlash;
+	ubyte						DisableGaussSplash;
+	ubyte						team_color[2];
+	ubyte						NewSpawnAlgorithm;
 } __pack__ netgame_info;
+
+extern int Host_is_obs; // Reminder for host only that they are an observer.  Do not set for other players or observers.
+
+// Events for observatory UI.
+#define OBSEV_NONE 0
+#define OBSEV_KILL 1
+#define OBSEV_DEATH 2
+#define OBSEV_SELF 4
+#define OBSEV_REACTOR 8
+#define OBSEV_ROBOT 16
+#define OBSEV_PLAYER 32
+
+typedef struct kill_event {
+	fix64 timestamp; // The time the event occurred.
+	ubyte obs_event; // The OBSEV event.  Can be added bitwise.
+	int score; // The player's score as a result of the event.
+	struct kill_event* next;
+	struct kill_event* prev;
+} __pack__ kill_event;
+
+// The first event for each player.
+extern kill_event* First_event[MAX_PLAYERS];
+
+// The last event for each player.  Used to append the next event.
+extern kill_event* Last_event[MAX_PLAYERS];
+
+// The last kill event for each player.  Used for last kill and run game statuses.
+extern kill_event* Last_kill[MAX_PLAYERS];
+
+// The last death event for each player.  Used for last kill and run game statuses.
+extern kill_event* Last_death[MAX_PLAYERS];
+
+// The current kill streak for each player.  Used for kill streak game status.
+extern int Kill_streak[MAX_PLAYERS];
+
+// When to show the score graph until.
+extern fix64 Show_graph_until;
+
+// Game statuses for observatory UI.
+enum game_status_type
+{
+	GST_KILL_STREAK = 1,
+	GST_LAST_KILL = 2,
+	GST_LAST_DEATH = 3,
+	GST_RUN = 4
+};
+
+// Defines a single game status.  Singly linked list.
+typedef struct game_status {
+	ubyte type; // The game_status_type.
+	char text[50]; // The text to be displayed.
+	struct game_status* next;
+} __pack__ game_status;
+
+// Defines all game statuses for a single player.  Singly linked list.
+typedef struct player_status {
+	ubyte pnum; // The player num.
+	struct game_status* statuses; // The beginning of the list of game statuses for the player.
+	struct player_status* next;
+} __pack__ player_status;
+
+// The first player status to display.
+extern player_status* First_status;
+
+// Adds a player status.
+void add_player_status(ubyte pnum, game_status status);
+
+// Removes a player status.
+void remove_player_status(ubyte pnum, ubyte type);
+
+// Types of damage for observatory UI.
+enum damage_type
+{
+	DAMAGE_WEAPON = 0,
+	DAMAGE_BLAST = 1,
+	DAMAGE_COLLISION = 2,
+	DAMAGE_WALL = 3,
+	DAMAGE_LAVA = 4,
+	DAMAGE_OVERCHARGE = 5,
+	DAMAGE_SHIELD = 6,
+	DAMAGE_UNKNOWN = 255
+};
+
+// Defines a shield status for a single source.  Singly linked list.
+typedef struct shield_status {
+	fix64 timestamp; // The time the status occurred.
+	fix shields; // The shield count.
+	struct shield_status* next;
+} __pack__ shield_status;
+
+// The beginning of the shield status list for the current point.
+extern shield_status* First_current_shield_status[MAX_PLAYERS];
+
+// The end of the shield status list for the current point.  Used to append the next status.
+extern shield_status* Last_current_shield_status[MAX_PLAYERS];
+
+// The beginning of the shield status list for the previous point.
+extern shield_status* First_previous_shield_status[MAX_PLAYERS];
+
+// The end of the shield status list for the current point.  Used to display the killing blow.
+extern shield_status* Last_previous_shield_status[MAX_PLAYERS];
+
+// When to show the death summary until.
+extern fix64 Show_death_until[MAX_PLAYERS];
+
+#define SHIP_COLLISION_DAMAGE 254
+#define SHIP_EXPLOSION_DAMAGE 255
+
+// Defines damage taken totals for a single source.  Doubly linked list.
+typedef struct damage_taken_totals {
+	fix64 total_damage; // The total damage taken by this source.
+	ubyte killer_type; // The killer type, OBJ_WALL OBJ_ROBOT OBJ_PLAYER or OBJ_CNTRLCEN.
+	ubyte killer_id; // If killer type is a player, this is the player ID who did the damage.
+	ubyte damage_type; // The damage_type.
+	ubyte source_id; // If damage type is a weapon or a blast, this is the weapon ID.  Convert to name with weapon_id_to_name.
+	struct damage_taken_totals* next;
+	struct damage_taken_totals* prev;
+} __pack__ damage_taken_totals;
+
+// The beginning of the list of overall (for the whole game) damage taken totals.
+extern damage_taken_totals* First_damage_taken_totals[MAX_PLAYERS];
+
+// The beginning of the list of damage taken totals for the current point.
+extern damage_taken_totals* First_damage_taken_current_totals[MAX_PLAYERS];
+
+// The beginning of the list of damage taken totals for the previous point.
+extern damage_taken_totals* First_damage_taken_previous_totals[MAX_PLAYERS];
+
+// Defines damage done totals for a single source.  Doubly linked list.
+typedef struct damage_done_totals {
+	fix64 total_damage; // The total damage done by this source.
+	ubyte source_id; // The weapon ID, or SHIP_EXPLOSION_DAMAGE, or SHIP_COLLISION_DAMAGE.
+	struct damage_done_totals* next;
+	struct damage_done_totals* prev;
+} __pack__ damage_done_totals;
+
+// The beginning of the list of damage done totals.
+extern damage_done_totals* First_damage_done_totals[MAX_PLAYERS];
+
+// Defines a kill for the kill log.  Singly linked list.
+typedef struct kill_log_event {
+	fix64 timestamp;
+	ubyte killed_id;
+	ubyte killer_type;
+	ubyte killer_id;
+	ubyte damage_type;
+	ubyte source_id;
+	struct kill_log_event* next;
+} __pack__ kill_log_event;
+
+// The kill log, with the first entry being the most recent.
+extern kill_log_event* Kill_log;
+
+// Adds a damage stat for observatory UI.
+void add_observatory_damage_stat(int player_num, fix shields_delta, fix new_shields, fix old_shields, ubyte killer_type, ubyte killer_id, ubyte damage_type, ubyte source_id);
+
+void reset_observatory_stats();
+
+#define NUM_OBS_MODES 4
+extern const char* Obs_mode_names[NUM_OBS_MODES];
+
 #endif /* _MULTI_H */

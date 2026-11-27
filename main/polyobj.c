@@ -23,6 +23,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include <string.h>
 
 #include "inferno.h"
+#include "config.h"
 #include "polyobj.h"
 #include "vecmat.h"
 #include "interp.h"
@@ -39,9 +40,11 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "piggy.h"
 #endif
 #include "render.h"
+#include "multi.h"
 #ifdef OGL
 #include "ogl_init.h"
 #endif
+#include "xmodel.h"
 
 #ifdef RT_DX12
 #include "RTgr.h"
@@ -521,6 +524,13 @@ void free_model(polymodel *po)
 grs_bitmap *texture_list[MAX_POLYOBJ_TEXTURES];
 bitmap_index texture_list_index[MAX_POLYOBJ_TEXTURES];
 
+int alt_textures_to_ship_color(bitmap_index alt_textures[]) {
+	if (alt_textures &&
+		alt_textures >= multi_player_textures[0] && alt_textures < multi_player_textures[MAX_PLAYERS])
+		return multi_player_tex_color[(alt_textures - multi_player_textures[0]) / N_PLAYER_SHIP_TEXTURES];
+	return 0;
+}
+
 //draw a polygon model
 
 void draw_polygon_model(_RT_DRAW_POLY vms_vector* pos, vms_matrix* orient, vms_angvec* anim_angles, int model_num, int flags, g3s_lrgb light, fix* glow_values, bitmap_index alt_textures[])
@@ -530,6 +540,15 @@ void draw_polygon_model(_RT_DRAW_POLY vms_vector* pos, vms_matrix* orient, vms_a
 
 	if (model_num < 0)
 		return;
+
+#ifdef OGL
+	if (GameCfg.UseCustomModels && (!(Game_mode & GM_MULTI) || Netgame.AllowCustomModelsTextures) && xmodel_exists(XM_POLYOBJ, model_num))
+	{
+		ogl_enable_textures();
+		if (xmodel_show_if_loaded(XM_POLYOBJ, model_num, pos, orient, alt_textures_to_ship_color(alt_textures), &light))
+			return;
+	}
+#endif
 
 	Assert(model_num < N_polygon_models);
 

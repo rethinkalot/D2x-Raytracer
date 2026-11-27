@@ -117,7 +117,23 @@ static int pcx_read_bitmap_file(struct PCX_PHYSFS_file *const pcxphysfs, grs_bit
 	{
 		RT_ArenaMemoryScope(&g_thread_arena)
 		{
-			RT_Image image = RT_LoadImageFromDisk(&g_thread_arena, filename, 4, true);
+			// Read through PhysFS first so PNGs inside .dxa packs load too, then
+			// fall back to a plain file on disk.
+			RT_Image image = {0};
+			PHYSFS_file *png_file = PHYSFSX_openReadBuffered(filename);
+			if (png_file)
+			{
+				PHYSFS_sint64 png_size = PHYSFS_fileLength(png_file);
+				if (png_size > 0 && png_size < 512 * 1024 * 1024)
+				{
+					void *png_data = RT_ArenaAlloc(&g_thread_arena, (size_t)png_size, 16);
+					if (PHYSFS_read(png_file, png_data, 1, (PHYSFS_uint32)png_size) == png_size)
+						image = RT_LoadImageFromMemory(&g_thread_arena, png_data, (size_t)png_size, 4, true);
+				}
+				PHYSFS_close(png_file);
+			}
+			if (!image.pixels)
+				image = RT_LoadImageFromDisk(&g_thread_arena, filename, 4, true);
 
 			if (!image.pixels)
 				return PCX_ERROR_OPENING;

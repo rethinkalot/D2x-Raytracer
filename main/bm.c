@@ -23,6 +23,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 #include "pstypes.h"
 #include "inferno.h"
+#include "config.h"
 #include "gr.h"
 #include "bm.h"
 #include "u_mem.h"
@@ -44,6 +45,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "aistruct.h"
 #include "robot.h"
 #include "weapon.h"
+#include "customsnd.h"
 #include "gauges.h"
 #include "player.h"
 #include "endlevel.h"
@@ -52,6 +54,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "interp.h"
 #include "console.h"
 #include "rle.h"
+#include "xmodel.h"
 #include "args.h"
 
 #ifdef EDITOR
@@ -164,6 +167,12 @@ int gamedata_init()
 				Error("Cannot open ham file\n");
 
 	piggy_read_sounds();
+	custom_sounds_init(); // slikenetmsg.wav
+
+#ifdef OGL
+	if (GameCfg.UseCustomModels)
+		xmodel_load_all();
+#endif
 
 	return 0;
 }

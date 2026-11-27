@@ -150,6 +150,7 @@ target_sources(descent2 PRIVATE
 	"arch/sdl/digi_mixer_music.c"
 	"arch/sdl/jukebox.c"
 	"arch/win32/messagebox.c"
+	"arch/win32/crashdump.c"
 	"iff/iff.c"
 	"libmve/decoder8.c"
 	"libmve/decoder16.c"
@@ -244,9 +245,16 @@ target_sources(descent2 PRIVATE
 	"texmap/ntmap.c"
 	"texmap/scanline.c"
 
-	#network
+	#network (D2s: SLikeNet in-game transport on the game port)
 	"main/net_udp.c"
-	
+	"main/net_udp_socket.c"
+	"main/net_udp_ui.c"
+	"main/slikenet_bridge.cpp"
+	"main/customsnd.c"
+
+	#D2s OpenGL-only features (xmodel, PNG textures) stubbed out for the raytracer
+	"main/rt_d2s_stubs.c"
+
 	${Graphic_Includes}
 )
 
@@ -264,13 +272,35 @@ target_include_directories(descent2 PRIVATE
 "../sdl-master/sdl"
 "../sdl-master/sdl/include"
 "../sdl-mixer-master"
+"../sdl-mixer-master/SDL"
 "../physfs-main/src"
 $ENV{RT_EXT_CODE_DIR}
 )
 
 add_compile_definitions(PUBLIC USE_SDLMIXER)
 
-target_link_libraries(descent2 
+# SLikeNet (RakNet fork) static library, same source snapshot as D2s (thirdparty/SLikeNet).
+file(GLOB SLIKENET_CORE_SOURCES
+	"${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/SLikeNet/Source/src/*.cpp"
+	"${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/SLikeNet/Source/src/*.c"
+)
+add_library(slikenet_modern STATIC ${SLIKENET_CORE_SOURCES})
+set_property(TARGET slikenet_modern PROPERTY CXX_STANDARD 17)
+target_compile_definitions(slikenet_modern PRIVATE
+	_RAKNET_SUPPORT_TCPInterface=1
+	_RAKNET_SUPPORT_PacketLogger=0
+	_RAKNET_SUPPORT_EmailSender=0
+	_RAKNET_SUPPORT_HTTPConnection=0
+	_CRT_SECURE_NO_WARNINGS
+	_WINSOCK_DEPRECATED_NO_WARNINGS
+)
+target_include_directories(slikenet_modern PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/SLikeNet/Source/include")
+target_link_libraries(slikenet_modern PUBLIC ws2_32 iphlpapi)
+
+target_link_libraries(descent2
+slikenet_modern
+iphlpapi
+dbghelp
 physfs-static
 #mingw32
 sdlmain

@@ -37,8 +37,8 @@ extern bitmap_index Gauges_hires[MAX_GAUGE_BMS];    // hires gauges
 
 // Flags for gauges/hud stuff
 
-extern void add_points_to_score();
-extern void add_bonus_points_to_score();
+extern void add_points_to_score(int points);
+extern void add_bonus_points_to_score(int points);
 
 void render_gauges(void);
 void init_gauges(void);
@@ -46,6 +46,8 @@ void close_gauges(void);
 void cockpit_decode_alpha(grs_bitmap *bm);
 void show_reticle(int reticle_type, int secondary_display);
 void show_mousefs_indicator(int mx, int my, int mz, int x, int y, int size);
+
+extern int hud_stack_y(void);  // bottom-right readout stack baseline (gamerend.c)
 
 extern void draw_hud();     // draw all the HUD stuff
 
@@ -110,5 +112,7 @@ extern span weapon_window_left[],weapon_window_left_hires[],weapon_window_right[
 #define RET_COLOR_DEFAULT_G     32
 #define RET_COLOR_DEFAULT_B     0
 #define RET_COLOR_DEFAULT_A     0
+
+extern int Observer_message_y_start;
 
 #endif /* _GAUGES_H */

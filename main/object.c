@@ -141,7 +141,8 @@ char	Object_type_names[MAX_OBJECT_TYPES][9] = {
 static unsigned int homerFrameCount = 0; 
 static fix currentHomerFrameTime = F0_0; 
 static int doHomerFrame = 0; 
-static fix idealHomerFrameTime = F1_0/idealHomerFPS;
+static float idealHomerFPS = 25.0;
+static fix idealHomerFrameTime = F1_0/25;
 
 
 #ifndef RELEASE
@@ -235,15 +236,23 @@ void draw_object_blob(object *obj,bitmap_index bmi)
 		vm_vec_scale_add2(&pos,&offs_vec,F1_0);
 	}
 
+#ifdef OGL
 	if( (Game_mode & GM_MULTI) && 
 		Netgame.DarkSmartBlobs &&
 		obj->type == OBJ_WEAPON && 
 		obj->id == PLAYER_SMART_HOMING_ID &&
 		obj->ctype.laser_info.parent_num == Players[Player_num].objnum) {
 
+#ifdef OGL
 		g3_draw_bitmap_colorwarp(&pos,fixmuldiv(obj->size,bm->bm_w,bm->bm_h),obj->size,bm, 0.0, 0.4, 0.0);
+#else
+		// Color warping not implemented in software renderer
+		g3_draw_bitmap(&pos, fixmuldiv(obj->size, bm->bm_w, bm->bm_h), obj->size, bm);
+#endif
 
-	} else {
+	} else
+#endif
+	{
 		if (bm->bm_w > bm->bm_h)
 			g3_draw_bitmap(&pos,obj->size,fixmuldiv(obj->size,bm->bm_h,bm->bm_w),bm);
 		
@@ -417,6 +426,51 @@ void draw_cloaked_object(object *obj,g3s_lrgb light,fix *glow,fix64 cloak_start_
 
 }
 
+// Fade level for a player ship seen by an observer, or GR_FADE_OFF for none.
+// The observed ship gets the normal fade when "Transparent third person ship" is on, and any ship
+// closer than 15 units to the camera fades further, to almost invisible at 5 units, whatever the option.
+// Fade levels here: 0 is solid and a higher level is more transparent (alpha = 1 - level/33).
+static int observer_ship_fade(object *obj)
+{
+	if (obj->type != OBJ_PLAYER || !is_observer())
+		return GR_FADE_OFF;
+
+	int base = 0;
+	fix dist = vm_vec_dist_quick(&Viewer->pos, &obj->pos);
+
+	if (!PlayerCfg.ObsTransparentThirdPerson[get_observer_game_mode()]) {
+		// normal fade is off, only the close-up fade below applies
+	} else if (Newdemo_state == ND_STATE_PLAYBACK) {
+		// A demo doesn't store which player was observed, so treat the ship nearest the camera as the observed one.
+		if (dist <= F1_0 * 32) {
+			int i, nearest = 1;
+			for (i = 0; i < MAX_PLAYERS; i++) {
+				if (Players[i].connected != CONNECT_PLAYING || Players[i].objnum < 0 || Players[i].objnum > Highest_object_index)
+					continue;
+				object *other = &Objects[Players[i].objnum];
+				if (other == obj || other == Viewer || other->type != OBJ_PLAYER)
+					continue;
+				if (vm_vec_dist_quick(&Viewer->pos, &other->pos) < dist) {
+					nearest = 0;
+					break;
+				}
+			}
+			if (nearest)
+				base = CLOAKED_FADE_LEVEL * 2 / 3;
+		}
+	} else if (Obs_at_distance && is_observing_player() && Players[Current_obs_player].objnum == obj - Objects)
+		base = CLOAKED_FADE_LEVEL * 2 / 3;
+
+	if (dist < F1_0 * 15) {
+		int wedge = 32;
+		if (dist > F1_0 * 5)
+			wedge -= (int)(((long long)(32 - base) * (dist - F1_0 * 5)) / (F1_0 * 10));
+		if (wedge > base)
+			base = wedge;
+	}
+	return base ? base : GR_FADE_OFF;
+}
+
 //draw an object which renders as a polygon model
 void draw_polygon_object(object *obj)
 {
@@ -426,10 +480,10 @@ void draw_polygon_object(object *obj)
 
 	light = compute_object_light(obj,NULL);
 
-	//	If option set for bright players in netgame, brighten them!
+	//	In demo playback, always brighten ships and missiles for visibility.
 #ifdef NETWORK
-	if (Game_mode & GM_MULTI)
-		if (Netgame.BrightPlayers)
+	if (Newdemo_state == ND_STATE_PLAYBACK || ((Newdemo_state == ND_STATE_PLAYBACK ? Newdemo_game_mode : Game_mode) & GM_MULTI))
+		if (Newdemo_state == ND_STATE_PLAYBACK || Netgame.BrightPlayers)
 			light.r = light.g = light.b = F1_0*2;
 #endif
 
@@ -460,7 +514,7 @@ void draw_polygon_object(object *obj)
 
 
 	imsave = Interpolation_method;
-	if (Linear_tmap_polygon_objects)
+	if (Linear_tmap_polygon_objects || (obj->type == OBJ_ROBOT))
 		Interpolation_method = 1;
 
 	//set engine glow value
@@ -557,6 +611,9 @@ void draw_polygon_object(object *obj)
 				}
 			}
 
+			int observer_fade = observer_ship_fade(obj);
+			if (observer_fade != GR_FADE_OFF)
+				gr_settransblend(observer_fade, GR_BLEND_NORMAL);
 			uint32_t old_flags;
 
 #ifdef RT_DX12
@@ -569,7 +626,7 @@ void draw_polygon_object(object *obj)
 			}
 #endif
 
-			draw_polygon_model(_RT_DRAW_POLY_SEND 
+			draw_polygon_model(_RT_DRAW_POLY_SEND
 				&obj->pos,
 					   &obj->orient,
 					   (vms_angvec *)&obj->rtype.pobj_info.anim_angles,obj->rtype.pobj_info.model_num,
@@ -577,6 +634,8 @@ void draw_polygon_object(object *obj)
 					   light,
 					   engine_glow_value,
 					   alt_textures);
+			if (observer_fade != GR_FADE_OFF)
+				gr_settransblend(GR_FADE_OFF, GR_BLEND_NORMAL);
 
 #ifdef RT_DX12
 			if (is_laser_with_inner_model)
@@ -778,6 +837,11 @@ void render_object(object *obj)
 	if ( obj == Viewer )
 		return;
 
+	// Don't draw a player if we are observing them in first person.
+	if (is_observer() && !Obs_at_distance && obj->type == OBJ_PLAYER && is_observing_player() && Players[Current_obs_player].objnum == obj - Objects) {
+		return;
+	}
+
 	if ( obj->type==OBJ_NONE )
 	{
 		#ifndef NDEBUG
@@ -884,7 +948,7 @@ void reset_player_object()
 
 	//Init render info
 
-	ConsoleObject->render_type = RT_POLYOBJ;
+	ConsoleObject->render_type = is_observer() ? RT_NONE : RT_POLYOBJ;
 	ConsoleObject->rtype.pobj_info.model_num = Player_ship->model_num;		//what model is this?
 	ConsoleObject->rtype.pobj_info.subobj_flags = 0;		//zero the flags
 	ConsoleObject->rtype.pobj_info.tmap_override = -1;		//no tmap override!
@@ -1092,7 +1156,9 @@ void obj_link(int objnum,int segnum)
 
 	obj->segnum = segnum;
 	
-	obj->next = Segments[segnum].objects;
+	if (Segments[segnum].objects != objnum)
+		obj->next = Segments[segnum].objects;
+
 	obj->prev = -1;
 
 	Segments[segnum].objects = objnum;
@@ -1143,7 +1209,7 @@ int obj_get_signature()
 		sig++;
 		if (sig < 0)
 			sig = 0;
-		for (i = 0; i <= MAX_OBJECTS; i++)
+		for (i = 0; i < MAX_OBJECTS; i++)
 		{
 			if ((sig == Objects[i].signature) && (Objects[i].type != OBJ_NONE))
 			{
@@ -1387,6 +1453,7 @@ int obj_create(enum object_type_t type,ubyte id,int segnum,const vms_vector *pos
 		Assert(obj->control_type == CT_WEAPON);
 		obj->mtype.phys_info.flags |= (Weapon_info[obj->id].persistent*PF_PERSISTENT);
 		obj->ctype.laser_info.creation_time = GameTime64;
+		obj->ctype.laser_info.creation_framecount = homerFrameCount;
 		obj->ctype.laser_info.last_hitobj = -1;
 		memset(&obj->ctype.laser_info.hitobj_list, 0, sizeof(ubyte)*MAX_OBJECTS);
 		obj->ctype.laser_info.multiplier = F1_0;
@@ -1510,7 +1577,7 @@ void dead_player_end(void)
 	Player_exploded = 0;
 	obj_delete(Dead_player_camera-Objects);
 	//Dead_player_camera = NULL;
-	select_cockpit(PlayerCfg.CockpitMode[0]);
+	select_cockpit(PlayerCfg.PreferredCockpitMode);
 	Viewer = Viewer_save;
 	ConsoleObject->type = OBJ_PLAYER;
 	ConsoleObject->flags = Player_flags_save;
@@ -1809,7 +1876,7 @@ void start_player_death_sequence(object *player)
 	player->flags &= ~OF_SHOULD_BE_DEAD;
 //	Players[Player_num].flags |= PLAYER_FLAGS_INVULNERABLE;
 	player->control_type = CT_NONE;
-	player->shields = F1_0*1000;
+	player->shields = INITIAL_SHIELDS;
 
 	PALETTE_FLASH_SET(0,0,0);
 }
@@ -1875,7 +1942,7 @@ void obj_relink_all(void)
 			segnum = obj->segnum;
 			obj->next = obj->prev = obj->segnum = -1;
 			
-			if (segnum > Highest_segment_index)
+			if (segnum < 0 || segnum > Highest_segment_index)
 				segnum = 0;
 			obj_link(objnum, segnum);
 		}
@@ -1934,6 +2001,9 @@ void object_move_one( object * obj )
 		fix fuel=fuelcen_give_fuel( &Segments[obj->segnum], INITIAL_ENERGY-Players[Player_num].energy );
 		if (fuel > 0 )	{
 			Players[Player_num].energy += fuel;
+
+			if (Game_mode & GM_MULTI)
+				multi_send_ship_status();
 		}
 
 		fix shields = repaircen_give_shields( &Segments[obj->segnum], INITIAL_SHIELDS-Players[Player_num].shields );
@@ -1976,9 +2046,9 @@ void object_move_one( object * obj )
 
 		#ifndef RELEASE
 		case CT_SLEW:
-			if ( keyd_pressed[KEY_PAD5] ) slew_stop( obj );
+			if ( keyd_pressed[KEY_PAD5] ) slew_stop();
 			if ( keyd_pressed[KEY_NUMLOCK] ) 		{
-				slew_reset_orient( obj );
+				slew_reset_orient();
 			}
 			slew_frame(0 );		// Does velocity addition for us.
 			break;
@@ -2004,7 +2074,7 @@ void object_move_one( object * obj )
 #ifdef __DJGPP__
 			Error("Unknown control type %d in object %li, sig/type/id = %i/%i/%i",obj->control_type, obj-Objects, obj->signature, obj->type, obj->id);
 #else
-			Error("Unknown control type %d in object %i, sig/type/id = %i/%i/%i",obj->control_type, (int)(obj-Objects), obj->signature, obj->type, obj->id);
+			con_printf(CON_NORMAL, "Unknown control type %d in object %i, sig/type/id = %i/%i/%i",obj->control_type, (int)(obj-Objects), obj->signature, obj->type, obj->id);
 #endif
 
 			break;
@@ -2619,4 +2689,26 @@ void object_rw_swap(object_rw *obj, int swap)
 			break;
 			
 	}
+}
+
+void set_homing_update_rate(int update_rate) {
+	idealHomerFPS = update_rate;
+	idealHomerFrameTime = F1_0 / update_rate;
+	currentHomerFrameTime = 0;
+
+	//	Set value to determine whether homing missile can see target.
+	//	The lower frametime is, the more likely that it can see its target.
+	//	"Original D1 Weapons" uses D1's base cone, so the keep-lock cone follows the Homing rate exactly as in D1.
+	{
+		fix min_dot = using_original_d1_weapons() ? D1_MIN_TRACKABLE_DOT : MIN_TRACKABLE_DOT;
+
+		if (idealHomerFrameTime <= F1_0/16)
+			Min_trackable_dot = 3*(F1_0 - min_dot)/4 + min_dot;
+		else if (idealHomerFrameTime < F1_0/4)
+			Min_trackable_dot = fixmul(F1_0 - min_dot, F1_0-4*idealHomerFrameTime) + min_dot;
+		else
+			Min_trackable_dot = min_dot;
+	}
+
+	con_printf(CON_DEBUG, "Homing update rate: %d\n", update_rate);
 }

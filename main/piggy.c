@@ -51,6 +51,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "byteswap.h"
 #include "makesig.h"
 #include "console.h"
+#include "pngfile.h"
 #include "effects.h"
 
 //#define NO_DUMP_SOUNDS        1   //if set, dump bitmaps but not sounds
@@ -602,7 +603,6 @@ void piggy_new_pigfile(char *pigname)
 		N_bitmaps = 0;          //no pigfile, so no bitmaps
 
 	#ifndef EDITOR
-
 	Assert(N_bitmaps == Num_bitmap_files-1);
 
 	#else
@@ -1225,7 +1225,6 @@ void piggy_bitmap_page_out_all()
 	int i;
 	
 	Piggy_bitmap_cache_next = 0;
-
 	piggy_page_flushed++;
 
 	texmerge_flush();
@@ -1471,6 +1470,7 @@ void piggy_close()
 {
 	int i;
 
+	free_png_cache();
 	piggy_close_file();
 
 	if (BitmapBits)
@@ -1907,7 +1907,7 @@ void load_d1_bitmap_replacements()
 
 #define D1_PIG_LOAD_FAILED "Failed loading " D1_PIGFILE
 	if (!d1_Piggy_fp) {
-		Warning(D1_PIG_LOAD_FAILED);
+		con_printf(CON_URGENT, D1_PIG_LOAD_FAILED "\n"); // gamelog only, no popup
 		return;
 	}
 
@@ -2033,7 +2033,7 @@ bitmap_index read_extra_bitmap_d1_pig(char *name)
 
 		if (!d1_Piggy_fp)
 		{
-			Warning(D1_PIG_LOAD_FAILED);
+			con_printf(CON_URGENT, D1_PIG_LOAD_FAILED "\n"); // gamelog only, no popup
 			return bitmap_num;
 		}
 

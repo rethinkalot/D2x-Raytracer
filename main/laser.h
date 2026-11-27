@@ -95,10 +95,12 @@ enum weapon_type_t
 #define MIN_TRACKABLE_DOT               (7*F1_0/8)
 #define MAX_TRACKABLE_DIST              (F1_0*250)
 #define HOMING_MISSILE_STRAIGHT_TIME    (F1_0/8)    //  Changed as per request of John, Adam, Yuan, but mostly John
+#define D1_MIN_TRACKABLE_DOT            (3*F1_0/4)  //  D1's wider lock-on cone (41 degrees), used with "Original D1 Weapons"
 
 struct object;
 
 extern fix Min_trackable_dot;   //  MIN_TRACKABLE_DOT inversely scaled by FrameTime
+int using_original_d1_weapons(void); // host's "Original D1 Weapons" in multiplayer, the Misc option in single player
 
 void Laser_render(struct object *obj);
 void Laser_player_fire(struct object * obj, int type, int gun_num, int make_sound, int harmless_flag, vms_vector shot_orientation); /* CED sniperpackets */
@@ -107,7 +109,7 @@ void Laser_do_weapon_sequence(struct object *obj, int doHomerFrame, fix idealHom
 void Flare_create(struct object *obj);
 int laser_are_related(int o1, int o2);
 
-extern int do_laser_firing_player(void);
+extern void do_laser_firing_player(void);
 extern void do_missile_firing(int drop_bomb);
 extern void net_missile_firing(int player, int weapon, int flags);
 extern int Network_laser_track;

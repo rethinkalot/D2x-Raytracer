@@ -84,53 +84,226 @@ void game_draw_multi_message()
 	if ( (Game_mode&GM_MULTI) && (multi_sending_message[Player_num]))	{
 		gr_set_curfont(GAME_FONT);
 		gr_set_fontcolor(BM_XRGB(0,63,0),-1);
-		gr_printf(0x8000, (LINE_SPACING*5)+FSPACY(1), "%s: %s_", TXT_MESSAGE, Network_message );
+		gr_printf(0x8000, (LINE_SPACING*5)+Observer_message_y_start, "%s: %s_", TXT_MESSAGE, Network_message );
 	}
 
 	if ( (Game_mode&GM_MULTI) && (multi_defining_message))	{
 		gr_set_curfont(GAME_FONT);
 		gr_set_fontcolor(BM_XRGB(0,63,0),-1);
-		gr_printf(0x8000, (LINE_SPACING*5)+FSPACY(1), "%s #%d: %s_", TXT_MACRO, multi_defining_message, Network_message );
+		gr_printf(0x8000, (LINE_SPACING*5)+Observer_message_y_start, "%s #%d: %s_", TXT_MACRO, multi_defining_message, Network_message );
 	}
 }
 #endif
 
+// Vertical placement for the bottom-right readout stack. Shared by the FPS line,
+// the speedrun timers and the velocity/rotation meter so they all stack
+// consistently and never collide. Exported (not static) so gauges.c can put the
+// velocity readout on the same baseline.
+int hud_stack_y(void)
+{
+	int y = GHEIGHT;
+
+	// Single player reserves the same space as multiplayer so these lines never
+	// overlap the status bar or message text. In single-player FULL SCREEN
+	// there is no netgame HUD stack at all, so one extra line of clearance is
+	// kept to stop the readout crowding the bottom of the screen.
+	if (PlayerCfg.CurrentCockpitMode == CM_FULL_SCREEN) {
+		if ((Game_mode & GM_MULTI) || (Newdemo_state == ND_STATE_PLAYBACK && Newdemo_game_mode & GM_MULTI))
+			y -= LINE_SPACING * 15;
+		else
+			y -= LINE_SPACING * 11;
+	} else if (PlayerCfg.CurrentCockpitMode == CM_STATUS_BAR)
+		y -= LINE_SPACING * 7;
+	else
+		y -= LINE_SPACING * 8;
+
+	return y;
+}
+
+// Cache of the right-aligned x position for one of the two speedrun lines.
+//
+// The HUD font is PROPORTIONAL: get_char_width_f() (2d/font.c) returns an
+// individual width per glyph, so '1' and '8' do not occupy the same number of
+// pixels. Padding the digits to a constant character count is therefore NOT
+// enough to stop the readout twitching -- right-aligning by the measured width
+// of the live string moves the whole line every time a digit changes glyph,
+// which is most visible in the hundredths field where all ten digits cycle
+// twice a second.
+//
+// So the position is derived ONCE from a fixed reference string of all-widest
+// digits ("88:88.88") and then reused for the life of the run. The live digits
+// are drawn left-to-right into that box, so every character stays nailed to the
+// same pixel column and only the glyph inside each column changes.
+//
+// cached_for_swidth allows the position to be recomputed if the screen
+// resolution or scaling changes at runtime, which would otherwise leave stale.
+struct speedrun_timer_pos {
+	int pos;
+	int cached_for_swidth;
+};
+
+static struct speedrun_timer_pos speedrun_timer_x[2];	// [0]=IGT, [1]=RTA
+
+static int speedrun_timer_line_x(int which, const char *label)
+{
+	int sw, sh, aw;
+
+	// Uninitialised (pos <= 0), or the screen geometry changed.
+	if (speedrun_timer_x[which].pos <= 0 ||
+		speedrun_timer_x[which].cached_for_swidth != SWIDTH)
+	{
+		char ref[16];
+
+		snprintf(ref, sizeof(ref), "%s: 88:88.88", label);
+		gr_get_string_size(ref, &sw, &sh, &aw);
+
+		speedrun_timer_x[which].pos = SWIDTH - FSPACX(4) - sw;
+		speedrun_timer_x[which].cached_for_swidth = SWIDTH;
+	}
+
+	return speedrun_timer_x[which].pos;
+}
+
+// Format a speedrun clock as "MM:SS.hh", rolling into minutes once the seconds
+// field passes 59 -- the same shape as any normal stopwatch.
+//
+// NOTE: the zero-padded field widths below are for readability, NOT for
+// anti-jitter. Character-count padding cannot stop jitter in a proportional
+// font; the guarantee comes from speedrun_timer_line_x() pinning the draw
+// position to a fixed box (see there).
+static void speedrun_format_time(char *buf, size_t buflen, const char *label, fix64 ms)
+{
+	fix64 total_h = ms / 10;			// total hundredths
+	fix64 mins = total_h / 6000;		// 6000 hundredths == 1 minute
+
+	// NOTE: deliberately no clamp on `mins`. An earlier revision clamped it to
+	// 99 to hold the string width constant, which meant a long session would
+	// freeze at "99:59.99" and then sit there forever -- a silently wrong timer.
+	// The minutes field is instead zero-padded to a minimum of two digits, so
+	// width only ever grows (once, at 100 minutes) and never jitters frame to
+	// frame during normal play.
+	snprintf(buf, buflen, "%s: %02lld:%02lld.%02lld", label,
+		(long long)mins,
+		(long long)((total_h / 100) % 60),
+		(long long)(total_h % 100));
+}
+
+// RTA is shown during gameplay and transitions. IGT is shown during gameplay
+// only (and remains visible, frozen, over the Escape pause screen).
+
+void show_speedrun_timers(void)
+{
+	int y;
+
+	if (!PlayerCfg.ShowSpeedrunTimers)
+		return;
+
+	// Speedrun clocks are a single-player concept -- an IGT/RTA pair only means
+	// anything for one player running one course without interruption. In
+	// multiplayer the bottom-right corner is already carrying the player card
+	// grid and scoreboard, so the clocks are suppressed there. As with the
+	// option toggle above, this only hides the readout; the clocks keep
+	// accumulating underneath.
+	if (Game_mode & GM_MULTI)
+		return;
+
+	// Nothing meaningful to show before a run has started.
+	if (!(Speedrun_rta_running || Speedrun_rta > 0))
+		return;
+
+	y = hud_stack_y();
+
+	gr_set_curfont(GAME_FONT);
+	gr_set_fontcolor((Speedrun_continued || cheats.enabled)
+		? BM_XRGB(31,31,31) : BM_XRGB(0,31,0), -1);
+
+	// NOTE: no per-frame gr_get_string_size() here on purpose. The font is
+	// proportional, so measuring the live string and subtracting its width from
+	// the right margin makes the whole line slide sideways every time a digit's
+	// glyph changes width. speedrun_timer_line_x() returns a fixed position
+	// computed once from an all-widest reference string, so each character stays
+	// in the same pixel column while only its glyph changes.
+	{
+		char buf[32];
+
+		speedrun_format_time(buf, sizeof(buf), "RTA", Speedrun_rta);
+		gr_printf(speedrun_timer_line_x(1, "RTA"), y + LINE_SPACING * 2, "%s", buf);
+
+		if (Speedrun_igt_running || speedrun_pause_menu_is_visible())
+		{
+			speedrun_format_time(buf, sizeof(buf), "IGT", Speedrun_igt);
+			gr_printf(speedrun_timer_line_x(0, "IGT"), y + LINE_SPACING * 3, "%s", buf);
+		}
+	}
+}
+
 void show_framerate()
 {
-	static int fps_count = 0, fps_rate = 0;
-	int y = GHEIGHT;
+	static int fps_count = 0, fps_rate = 0, demo_rate = 0;
+	int y;
 	static fix64 fps_time = 0;
+	fix64 now;
 
 	gr_set_curfont(GAME_FONT);
 	gr_set_fontcolor(BM_XRGB(0,31,0),-1);
 
-	if (PlayerCfg.CockpitMode[1] == CM_FULL_SCREEN) {
-		if ((Game_mode & GM_MULTI) || (Newdemo_state == ND_STATE_PLAYBACK && Newdemo_game_mode & GM_MULTI))
-			y -= LINE_SPACING * 10;
-		else
-			y -= LINE_SPACING * 4;
-	} else if (PlayerCfg.CockpitMode[1] == CM_STATUS_BAR) {
-		if ((Game_mode & GM_MULTI) || (Newdemo_state == ND_STATE_PLAYBACK && Newdemo_game_mode & GM_MULTI))
-			y -= LINE_SPACING * 6;
-		else
-			y -= LINE_SPACING * 1;
-	} else {
-		if ((Game_mode & GM_MULTI) || (Newdemo_state == ND_STATE_PLAYBACK && Newdemo_game_mode & GM_MULTI))
-			y -= LINE_SPACING * 7;
-		else
-			y -= LINE_SPACING * 2;
-	}
+	// Shared with show_speedrun_timers() so the FPS/DEMO lines and the RTA/IGT
+	// lines always stack from the same baseline and never drift apart.
+	y = hud_stack_y();
 
-	fps_count++;
-	if (timer_query() >= fps_time + F1_0)
+	now = timer_query_perf();
+	if (!fps_time)
 	{
-		fps_rate = fps_count;
+		fps_time = now;
 		fps_count = 0;
-		fps_time = timer_query();
 	}
-	gr_printf(GWIDTH-(GameArg.SysMaxFPS>999?FSPACX(43):FSPACX(37)),y,"FPS: %i",fps_rate);
-}
+	else
+	{
+		fps_count++;
+		if (now - fps_time >= F1_0)
+		{
+			fix64 elapsed = now - fps_time;
 
+			// Measure the actual interval with the pacing clock, not a coarse
+			// one-second frame count.
+			if (elapsed < (fix64)F1_0 * 2)
+				fps_rate = (int)(((fix64)fps_count * F1_0 + elapsed / 2) / elapsed);
+
+			demo_rate = Newdemo_recorded_fps; // the DEMO line steps once a second, like FPS
+			fps_time = now;
+			fps_count = 0;
+		}
+	}
+	// During demo playback also show the rate the demo was captured at, so the
+	// viewer can compare it against the framerate they are currently running.
+	// Purely informational -- playback speed is wall-clock based and does not
+	// depend on the capture rate.
+	//
+	// Both lines are right-aligned to the same margin by measuring the actual
+	// string width, rather than using a fixed pixel offset. The DEMO line is
+	// longer than the FPS line, so a fixed offset sized for "FPS: 167" would let
+	// it overhang the right edge of the screen.
+	{
+		char buf[32];
+		int sw, sh, aw, x;
+
+		if (Newdemo_state == ND_STATE_PLAYBACK && Newdemo_recorded_fps > 0)
+		{
+			if (!demo_rate)
+				demo_rate = Newdemo_recorded_fps;
+			snprintf(buf, sizeof(buf), "DEMO: %i", demo_rate);
+			gr_get_string_size(buf, &sw, &sh, &aw);
+			x = SWIDTH - FSPACX(4) - sw;
+			gr_printf(x, y + LINE_SPACING, "%s", buf);
+		}
+
+		snprintf(buf, sizeof(buf), "FPS: %i", fps_rate);
+		gr_get_string_size(buf, &sw, &sh, &aw);
+		x = SWIDTH - FSPACX(4) - sw;
+		gr_printf(x, y, "%s", buf);
+	}
+
+}
 
 void set_font_present() { gr_set_fontcolor(BM_XRGB(25,25,25),-1); }
 void set_font_absent() { gr_set_fontcolor(BM_XRGB(12,12,12),-1); }
@@ -155,11 +328,11 @@ void show_netplayerinfo()
 	gr_set_fontcolor(255,-1);
 
 	x=(SWIDTH/2)-FSPACX(120);
-	y=(SHEIGHT/2)-FSPACY(84);
+	y=(SHEIGHT/2)-FSPACY(90);
 
 	gr_settransblend(14, GR_BLEND_NORMAL);
 	gr_setcolor( BM_XRGB(0,0,0) );
-	gr_rect((SWIDTH/2)-FSPACX(120),(SHEIGHT/2)-FSPACY(84),(SWIDTH/2)+FSPACX(120),(SHEIGHT/2)+FSPACY(84));
+	gr_rect((SWIDTH/2)-FSPACX(120),(SHEIGHT/2)-FSPACY(90),(SWIDTH/2)+FSPACX(120),(SHEIGHT/2)+FSPACY(90));
 	gr_settransblend(GR_FADE_OFF, GR_BLEND_NORMAL);
 
 	// general game information
@@ -239,12 +412,24 @@ void show_netplayerinfo()
 	y+=LINE_SPACING;
 	gr_printf(x,y,"total time: %i:%02i:%02i",Players[Player_num].hours_total,f2i(Players[Player_num].time_total) / 60 % 60,f2i(Players[Player_num].time_total) % 60);
 
+	char hom_string[16];
+	snprintf(hom_string, sizeof(hom_string), "Hom %d", Netgame.HomingUpdateRate);
+	draw_flag(hom_string, Netgame.HomingUpdateRate != 25,                          base_flags_left + word_spacing*0, y);
+	draw_flag("ConfrSprk", Netgame.RemoteHitSpark,                                  base_flags_left + word_spacing*1, y);
+	draw_flag("CustMod",  Netgame.AllowCustomModelsTextures,                       base_flags_left + word_spacing*2, y);
 
-
+	set_font_newline();
 	y+=LINE_SPACING;
 	if (Netgame.KillGoal)
-		gr_printf(x,y,"Kill goal: %d",Netgame.KillGoal*5);
+		gr_printf(x,y,"Kill goal: %d",Netgame.KillGoal*10);
 
+	draw_flag("ReduFlas", Netgame.ReducedFlash,                                    base_flags_left + word_spacing*0, y);
+	const char *ammo_style[] = {"AmmoDupl", "AmmoDepl", "AmmoDrop", "AmmoSpaw"};
+	draw_flag(ammo_style[Netgame.GaussAmmoStyle], Netgame.GaussAmmoStyle != 2,     base_flags_left + word_spacing*1, y);
+	draw_flag("WeakGaus", Netgame.DisableGaussSplash,                              base_flags_left + word_spacing*2, y);
+
+	set_font_newline();
+	y+=LINE_SPACING;
 
 	gr_printf(base_flags_left, y, "Items: "); 
 	draw_flag("L", Netgame.AllowedItems & NETFLAG_DOLASER,     flags_x, y);  flags_x += letter_spacing; 
@@ -303,15 +488,16 @@ void show_netplayerinfo()
 	// process players table
 	for (i=0; i<MAX_PLAYERS; i++)
 	{
-		if (!Players[i].connected)
+		if (!Players[i].connected || i == 0 && Netgame.host_is_obs)
 			continue;
 
 		y+=LINE_SPACING;
 
-		if (Game_mode & GM_TEAM)
-			color=get_team(i);
-		else
-			color=Netgame.players[i].color;//i;
+		//if (Game_mode & GM_TEAM)
+		//	color=get_team(i);
+		//else
+		//	color=Netgame.players[i].color;//i;
+		color = get_color_for_player(i, 0);
 		gr_set_fontcolor( BM_XRGB(selected_player_rgb[color].r,selected_player_rgb[color].g,selected_player_rgb[color].b),-1 );
 		gr_printf(x,y,"%s\n",Players[i].callsign);
 		if (Game_mode & GM_MULTI_COOP)
@@ -336,11 +522,13 @@ void show_netplayerinfo()
 		gr_printf(x,y,"team");
 		gr_printf(x+FSPACX(8)*8,y,"score");
 		y+=LINE_SPACING;
-		gr_set_fontcolor(BM_XRGB(selected_player_rgb[0].r,selected_player_rgb[0].g,selected_player_rgb[0].b),-1 );
+		color = get_color_for_team(0);
+		gr_set_fontcolor(BM_XRGB(selected_player_rgb[color].r,selected_player_rgb[color].g,selected_player_rgb[color].b),-1 );
 		gr_printf(x,y,"%s:",Netgame.team_name[0]);
 		gr_printf(x+FSPACX(8)*8,y,"%i",team_kills[0]);
 		y+=LINE_SPACING;
-		gr_set_fontcolor(BM_XRGB(selected_player_rgb[1].r,selected_player_rgb[1].g,selected_player_rgb[1].b),-1 );
+		color = get_color_for_team(1);
+		gr_set_fontcolor(BM_XRGB(selected_player_rgb[color].r,selected_player_rgb[color].g,selected_player_rgb[color].b),-1 );
 		gr_printf(x,y,"%s:",Netgame.team_name[1]);
 		gr_printf(x+FSPACX(8)*8,y,"%i",team_kills[1]);
 		y+=LINE_SPACING*2;
@@ -427,6 +615,17 @@ void draw_window_label()
 
 	}
 }
+
+void draw_debug_text()
+{
+	gr_set_curfont(GAME_FONT);
+	gr_set_fontcolor(BM_XRGB(0, 63, 0), -1);
+
+	int y = (LINE_SPACING * 5) + FSPACY(1);
+	// Draw real-time debug info here (copy as many times as you need lines)
+	//gr_printf(FSPACX(1), y, "P: %+0.4f", f2fl(ConsoleObject->mtype.phys_info.rotthrust.x));
+	//y += LINE_SPACING;
+}
 #endif
 
 void render_countdown_gauge()
@@ -459,6 +658,7 @@ void game_draw_hud_stuff()
 #endif
 #ifndef NDEBUG
 	draw_window_label();
+	draw_debug_text();
 #endif
 
 #ifdef NETWORK
@@ -473,13 +673,14 @@ void game_draw_hud_stuff()
 
 		if (Newdemo_state == ND_STATE_PLAYBACK) {
 			if (Newdemo_show_percentage) {
-			  	sprintf(message, "%s (%d%%%% %s)", TXT_DEMO_PLAYBACK, newdemo_get_percent_done(), TXT_DONE);
+			  	sprintf(message, "%s (%d%% %s)", TXT_DEMO_PLAYBACK, newdemo_get_percent_done(), TXT_DONE);
 			} else {
 				sprintf (message, " ");
 			}
 		} else {
-			extern int Newdemo_num_written;
-			sprintf (message, "%s (%dK)", TXT_DEMO_RECORDING, (Newdemo_num_written / 1024));
+			//extern int Newdemo_num_written;
+			//sprintf (message, "%s (%dK)", TXT_DEMO_RECORDING, (Newdemo_num_written / 1024));
+			sprintf (message, "%s", TXT_DEMO_RECORDING);
 		}
 
 		gr_set_curfont( GAME_FONT );
@@ -487,16 +688,29 @@ void game_draw_hud_stuff()
 
 		y = GHEIGHT-(LINE_SPACING*2);
 
-		if (PlayerCfg.CockpitMode[1] == CM_FULL_COCKPIT)
+		if (is_observer() && can_draw_observer_cockpit() && PlayerCfg.CurrentCockpitMode == CM_FULL_COCKPIT)
 			y = grd_curcanv->cv_bitmap.bm_h / 1.2 ;
-		if (PlayerCfg.CockpitMode[1] != CM_REAR_VIEW)
-			gr_string(0x8000, y, message );
+
+		if (PlayerCfg.CurrentCockpitMode != CM_REAR_VIEW &&
+			(!PlayerCfg.AutoDemoHideUi || !Newdemo_is_autorecord)) {
+			if (PlayerCfg.DemoRecordingIndicator == 0) {
+				gr_string(0x8000, y, message);
+			}
+			else if (PlayerCfg.DemoRecordingIndicator == 1) {
+				gr_setcolor(BM_XRGB(27, 0, 0));
+				gr_disk(i2f(grd_curcanv->cv_bitmap.bm_w / 2), i2f(y + 8), i2f(8));
+			}
+		}
 	}
 
 	render_countdown_gauge();
 
-	if (GameCfg.FPSIndicator && PlayerCfg.CockpitMode[1] != CM_REAR_VIEW)
+	if (GameCfg.FPSIndicator && PlayerCfg.CurrentCockpitMode != CM_REAR_VIEW)
 		show_framerate();
+
+	// Keep both timer readouts independent from the FPS indicator. RTA remains
+	// visible through transitions; IGT is drawn only while active gameplay runs.
+	show_speedrun_timers();
 
 	if (Newdemo_state == ND_STATE_PLAYBACK)
 		Game_mode = Newdemo_game_mode;
@@ -504,7 +718,7 @@ void game_draw_hud_stuff()
 	draw_hud();
 
 	if (Newdemo_state == ND_STATE_PLAYBACK)
-		Game_mode = GM_NORMAL;
+		Game_mode = GM_NORMAL | (Game_mode & GM_OBSERVER);
 
 	if ( Player_is_dead )
 		player_dead_message();
@@ -612,7 +826,7 @@ void show_extra_views()
 			DemoDoingLeft=DemoDoLeft;
 
 			if (DemoDoLeft==3)
-				do_cockpit_window_view(0,ConsoleObject,1,WBU_REAR,"REAR");
+				do_cockpit_window_view(0,get_player_view_object(),1,WBU_REAR,"REAR");
 			else
 				do_cockpit_window_view(0,&DemoLeftExtra,DemoRearCheck[DemoDoLeft],DemoWBUType[DemoDoLeft],DemoExtraMessage[DemoDoLeft]);
 		}
@@ -624,7 +838,7 @@ void show_extra_views()
 			DemoDoingRight=DemoDoRight;
 			
 			if (DemoDoRight==3)
-				do_cockpit_window_view(1,ConsoleObject,1,WBU_REAR,"REAR");
+				do_cockpit_window_view(1,get_player_view_object(),1,WBU_REAR,"REAR");
 			else
 			{
 				do_cockpit_window_view(1,&DemoRightExtra,DemoRearCheck[DemoDoRight],DemoWBUType[DemoDoRight],DemoExtraMessage[DemoDoRight]);
@@ -693,11 +907,11 @@ void show_extra_views()
 			case CV_REAR:
 				if (Rear_view) {		//if big window is rear view, show front here
 					RenderingType=3+(w<<4);				
-					do_cockpit_window_view(w,ConsoleObject,0,WBU_REAR,"FRONT");
+					do_cockpit_window_view(w,get_player_view_object(),0,WBU_REAR,"FRONT");
 				}
 				else {					//show normal rear view
 					RenderingType=3+(w<<4);				
-					do_cockpit_window_view(w,ConsoleObject,1,WBU_REAR,"REAR");
+					do_cockpit_window_view(w,get_player_view_object(),1,WBU_REAR,"REAR");
 				}
 			 	break;
 			case CV_ESCORT: {
@@ -765,9 +979,9 @@ void game_render_frame_mono(int flip)
 	const int vr_guided_big_window = Guided_missile[Player_num] && Guided_missile[Player_num]->type==OBJ_WEAPON &&
 		Guided_missile[Player_num]->id==GUIDEDMISS_ID && Guided_missile[Player_num]->signature==Guided_missile_sig[Player_num] &&
 		PlayerCfg.GuidedInBigWindow;
-	if (RT_VRActive() && !Rear_view && !BigWindowSwitch && !vr_guided_big_window && PlayerCfg.CockpitMode[1] != CM_MODEL_3D) {
+	if (RT_VRActive() && !Rear_view && !BigWindowSwitch && !vr_guided_big_window && PlayerCfg.CurrentCockpitMode != CM_MODEL_3D) {
 		// Only the current mode: CockpitMode[0] is the saved desktop preference.
-		PlayerCfg.CockpitMode[1] = CM_MODEL_3D;
+		PlayerCfg.CurrentCockpitMode = CM_MODEL_3D;
 		force_cockpit_redraw = 1;
 	}
 	if (RT_CheckWindowMinimized())
@@ -779,11 +993,11 @@ void game_render_frame_mono(int flip)
 	if (Guided_missile[Player_num] && Guided_missile[Player_num]->type==OBJ_WEAPON && Guided_missile[Player_num]->id==GUIDEDMISS_ID && Guided_missile[Player_num]->signature==Guided_missile_sig[Player_num] && PlayerCfg.GuidedInBigWindow) {
 		object *viewer_save = Viewer;
 
-		if (PlayerCfg.CockpitMode[1]==CM_FULL_COCKPIT || PlayerCfg.CockpitMode[1]==CM_REAR_VIEW || PlayerCfg.CockpitMode[1]==CM_MODEL_3D)
+		if (PlayerCfg.CurrentCockpitMode==CM_FULL_COCKPIT || PlayerCfg.CurrentCockpitMode==CM_REAR_VIEW || PlayerCfg.CurrentCockpitMode==CM_MODEL_3D)
 		{
-			 BigWindowSwitch=PlayerCfg.CockpitMode[1]==CM_MODEL_3D ? 2 : 1;
+			 BigWindowSwitch=PlayerCfg.CurrentCockpitMode==CM_MODEL_3D ? 2 : 1;
 			 force_cockpit_redraw=1;
-			 PlayerCfg.CockpitMode[1]=CM_STATUS_BAR;
+			 PlayerCfg.CurrentCockpitMode=CM_STATUS_BAR;
 			 return;
 		}
 
@@ -813,7 +1027,7 @@ void game_render_frame_mono(int flip)
 		if (BigWindowSwitch)
 		{
 			force_cockpit_redraw=1;
-			PlayerCfg.CockpitMode[1]=BigWindowSwitch==2 ? CM_MODEL_3D : (Rear_view?CM_REAR_VIEW:CM_FULL_COCKPIT);
+			PlayerCfg.CurrentCockpitMode=BigWindowSwitch==2 ? CM_MODEL_3D : (Rear_view?CM_REAR_VIEW:CM_FULL_COCKPIT);
 			BigWindowSwitch=0;
 			return;
 		}
@@ -828,17 +1042,22 @@ void game_render_frame_mono(int flip)
 	if (Newdemo_state == ND_STATE_PLAYBACK)
 		Game_mode = Newdemo_game_mode;
 
-	if (PlayerCfg.CockpitMode[1]==CM_FULL_COCKPIT || PlayerCfg.CockpitMode[1]==CM_STATUS_BAR)
-		render_gauges();
+	if (is_observer() && !can_draw_observer_cockpit()) {
+		// Do not render gauges.
+	} else {
+		if (PlayerCfg.CurrentCockpitMode == CM_FULL_COCKPIT || PlayerCfg.CurrentCockpitMode == CM_STATUS_BAR)
+			render_gauges();
 #ifdef RT_DX12
-	if (PlayerCfg.CockpitMode[1] == CM_MODEL_3D)
-		render_gauges();
+		if (PlayerCfg.CurrentCockpitMode == CM_MODEL_3D)
+			render_gauges();
 #endif
+	}
 
 	if (Newdemo_state == ND_STATE_PLAYBACK)
-		Game_mode = GM_NORMAL;
+		Game_mode = GM_NORMAL | (Game_mode & GM_OBSERVER);
 
 	gr_set_current_canvas(&Screen_3d_window);
+
 	if (!no_draw_hud)
 		game_draw_hud_stuff();
 
@@ -880,7 +1099,7 @@ void toggle_cockpit()
 	if (Rear_view || Player_is_dead)
 		return;
 
-	switch (PlayerCfg.CockpitMode[1])
+	switch (PlayerCfg.PreferredCockpitMode)
 	{
 		case CM_FULL_COCKPIT:
 			new_mode = CM_STATUS_BAR;
@@ -894,21 +1113,21 @@ void toggle_cockpit()
 			new_mode = CM_FULL_SCREEN;
 			break;
 		case CM_FULL_SCREEN:
-			new_mode = CM_FULL_COCKPIT;
-			if(PlayerCfg.DisableCockpit) {
-				new_mode = CM_STATUS_BAR; 
-			}
+			if (PlayerCfg.DisableCockpit)
+				new_mode = CM_STATUS_BAR;
+			else
+				new_mode = CM_FULL_COCKPIT;
 			break;
 	}
 
 	select_cockpit(new_mode);
 	HUD_clear_messages();
-	PlayerCfg.CockpitMode[0] = new_mode;
+	PlayerCfg.PreferredCockpitMode = new_mode;
 	write_player_file();
 }
 
 int last_drawn_cockpit = -1;
-extern void ogl_loadbmtexture(grs_bitmap *bm);
+extern void ogl_loadbmtexture(grs_bitmap *bm, int filter_blueship_wing);
 
 // This actually renders the new cockpit onto the screen.
 #ifdef OGL
@@ -920,50 +1139,54 @@ extern void ogl_loadbmtexture(grs_bitmap *bm);
 #endif
 void update_cockpits()
 {
-	grs_bitmap *bm;
+	if (is_observer() && !can_draw_observer_cockpit()) {
+		// Do not draw cockpit.
+	} else {
+		grs_bitmap *bm;
 
-	if (PlayerCfg.CockpitMode[1] < N_COCKPIT_BITMAPS/2) {
-		PIGGY_PAGE_IN(cockpit_bitmap[PlayerCfg.CockpitMode[1]+(HIRESMODE?(Num_cockpits/2):0)]);
-		bm=&GameBitmaps[cockpit_bitmap[PlayerCfg.CockpitMode[1]+(HIRESMODE?(Num_cockpits/2):0)].index];
-	}
+		if (PlayerCfg.CurrentCockpitMode < N_COCKPIT_BITMAPS/2) {
+			PIGGY_PAGE_IN(cockpit_bitmap[PlayerCfg.CurrentCockpitMode+(HIRESMODE?(Num_cockpits/2):0)]);
+			bm=&GameBitmaps[cockpit_bitmap[PlayerCfg.CurrentCockpitMode+(HIRESMODE?(Num_cockpits/2):0)].index];
+		}
 
-	switch( PlayerCfg.CockpitMode[1] )	{
-		case CM_FULL_COCKPIT:
-			gr_set_current_canvas(NULL);
-			UBITMAPM(0, 0, -1, grd_curcanv->cv_bitmap.bm_h, bm,255, F1_0);
-			break;
-		case CM_REAR_VIEW:
-			gr_set_current_canvas(NULL);
-			UBITMAPM(0, 0, -1, grd_curcanv->cv_bitmap.bm_h, bm,255, F1_0);
-			break;
-	
-		case CM_FULL_SCREEN:
-			break;
-	
-		case CM_STATUS_BAR:
-	
-			gr_set_current_canvas(NULL);
-			UBITMAPM(0, (HIRESMODE?(SHEIGHT*2)/2.6:(SHEIGHT*2)/2.72), -1, ((int) ((double) (bm->bm_h) * (HIRESMODE?(double)SHEIGHT/480:(double)SHEIGHT/200) + 0.5)), bm,255, F1_0);
-			break;
-	
-		case CM_LETTERBOX:
-			gr_set_current_canvas(NULL);
-			break;
+		switch (PlayerCfg.CurrentCockpitMode) {
+			case CM_FULL_COCKPIT:
+			case CM_REAR_VIEW:
+				gr_set_current_canvas(NULL);
+				UBITMAPM(0, 0, -1, grd_curcanv->cv_bitmap.bm_h, bm, 255, F1_0);
+				break;
 
+			case CM_FULL_SCREEN:
+				// Do not draw cockpit.
+				break;
+
+			case CM_STATUS_BAR:
+				gr_set_current_canvas(NULL);
+				UBITMAPM(0, (HIRESMODE?(SHEIGHT*2)/2.6:(SHEIGHT*2)/2.72), -1, ((int) ((double) (bm->bm_h) * (HIRESMODE?(double)SHEIGHT/480:(double)SHEIGHT/200) + 0.5)), bm, 255, F1_0);
+				break;
+
+			case CM_LETTERBOX:
+				gr_set_current_canvas(NULL);
+				break;
 #ifdef RT_DX12
-	    case CM_MODEL_3D:
-            break;
+			case CM_MODEL_3D:
+				break;
 #endif
+		}
 	}
 
 	gr_set_current_canvas(NULL);
 
-	if (PlayerCfg.CockpitMode[1] != last_drawn_cockpit)
-		last_drawn_cockpit = PlayerCfg.CockpitMode[1];
+	if (PlayerCfg.CurrentCockpitMode != last_drawn_cockpit)
+		last_drawn_cockpit = PlayerCfg.CurrentCockpitMode;
 	else
 		return;
 
-	if (PlayerCfg.CockpitMode[1]==CM_FULL_COCKPIT || PlayerCfg.CockpitMode[1]==CM_STATUS_BAR)
+	if (is_observer() && !can_draw_observer_cockpit()) {
+		return;
+	}
+
+	if (PlayerCfg.CurrentCockpitMode==CM_FULL_COCKPIT || PlayerCfg.CurrentCockpitMode==CM_STATUS_BAR)
 		init_gauges();
 
 }
@@ -992,6 +1215,8 @@ void show_boxed_message(char *msg, int RenderFlag)
 	nm_draw_background(x-BORDERX,y-BORDERY,x+w+BORDERX,y+h+BORDERY);
 	
 	gr_string( 0x8000, y, msg );
+	speedrun_transition_tick();
+	show_speedrun_timers();
 	
 	// If we haven't drawn behind it, need to flip
 	if (!RenderFlag)

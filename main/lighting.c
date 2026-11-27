@@ -633,18 +633,20 @@ void set_dynamic_light(void)
 	int	vert_segnum_list[MAX_VERTICES];
 	sbyte   render_vertex_flags[MAX_VERTICES];
 	int	render_seg,segnum, v;
-	static fix light_time; 
+	//static fix light_time;
 
 	Num_headlights = 0;
 
 	if (!Do_dynamic_light)
 		return;
 
-#ifndef RT_DX12
+#ifndef RT_DX12 // the raytracer casts muzzle-flash light itself (see #else below)
+	#if 0 // causes flickering with headlight on, CPU can handle it now
 	light_time += FrameTime;
 	if (light_time < (F1_0/60)) // it's enough to stress the CPU 60 times per second
 		return;
 	light_time = light_time - (F1_0/60);
+	#endif
 
 	memset(render_vertex_flags, 0, Highest_vertex_index+1);
 

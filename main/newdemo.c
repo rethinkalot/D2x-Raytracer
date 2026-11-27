@@ -22,6 +22,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h> // for memset
+#include <time.h>
 #include <errno.h>
 #include <ctype.h>
 
@@ -69,6 +70,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "vecmat.h"
 #include "menu.h"
 #include "args.h"
+#include "timer.h"
 #include "palette.h"
 #include "multi.h"
 #include "text.h"
@@ -140,6 +142,9 @@ extern void init_seismic_disturbances(void);
 #define ND_EVENT_SECRET_THINGY			48	// 0/1 = secret exit functional/non-functional
 #define ND_EVENT_LINK_SOUND_TO_OBJ		49	// record digi_link_sound_to_object3
 #define ND_EVENT_KILL_SOUND_TO_OBJ		50	// record digi_kill_sound_linked_to_object
+#define ND_EVENT_PLAYER_AFTERBURNER_STATE	51	// followed by old and current afterburner control states
+#define ND_EVENT_MULTI_AFTERBURNER_STOP	52	// followed by player number
+#define ND_EVENT_MULTI_AFTERBURNER_STOP_SIGNATURE	53	// followed by player number and object signature
 
 
 #define NORMAL_PLAYBACK 			0
@@ -147,7 +152,7 @@ extern void init_seismic_disturbances(void);
 #define INTERPOLATE_PLAYBACK			2
 #define INTERPOL_FACTOR				(F1_0 + (F1_0/5))
 
-#define DEMO_VERSION				15      // last D1 version was 13
+#define DEMO_VERSION				16      // last D1 version was 13; 16: the main viewer record carries its exact position and orientation
 #define DEMO_GAME_TYPE				3       // 1 was shareware, 2 registered
 
 #define DEMO_FILENAME				DEMO_DIR "tmpdemo.dem"
@@ -160,6 +165,7 @@ PHYSFS_file *outfile = NULL;
 
 // Some globals
 int Newdemo_state = 0;
+int Newdemo_is_autorecord = 0;
 int Newdemo_game_mode = 0;
 int Newdemo_vcr_state = 0;
 int Newdemo_show_percentage=1;
@@ -184,7 +190,11 @@ static ubyte nd_playback_v_dead = 0, nd_playback_v_rear = 0, nd_playback_v_guide
 int nd_playback_v_juststarted=0;
 
 // record variables
-#define REC_DELAY F1_0/20
+// Record at the configured framerate cap so high-FPS demos retain enough
+// motion samples for smooth playback. Playback timing remains time-based.
+#define REC_DELAY_DEFAULT F1_0/20
+static fix nd_rec_delay = REC_DELAY_DEFAULT;
+static void newdemo_set_record_delay(void);
 static int nd_record_v_start_frame = -1;
 static int nd_record_v_frame_number = -1;
 static short nd_record_v_framebytes_written = 0;
@@ -197,6 +207,7 @@ static sbyte nd_record_v_viewobjs[MAX_OBJECTS];
 static sbyte nd_record_v_rendering[32];
 static int nd_record_v_player_energy = -1;
 static fix nd_record_v_player_afterburner = -1;
+static ubyte nd_record_v_player_afterburner_state;
 static int nd_record_v_player_shields = -1;
 static uint nd_record_v_player_flags = -1;
 static int nd_record_v_weapon_type = -1;
@@ -204,6 +215,7 @@ static int nd_record_v_weapon_num = -1;
 static fix nd_record_v_homing_distance = -1;
 static int nd_record_v_primary_ammo = -1;
 static int nd_record_v_secondary_ammo = -1;
+static int nd_record_v_bomb_ammo[MAX_SECONDARY_WEAPONS]; // last recorded count per bomb, -1 = not yet
 
 void newdemo_record_oneframeevent_update();
 extern int digi_link_sound_to_object3( int org_soundnum, short objnum, int forever, fix max_volume, fix  max_distance, int loop_start, int loop_end );
@@ -287,7 +299,7 @@ int newdemo_write(const void *buffer, int elsize, int nelem )
 		return num_written;
 
 	nd_record_v_no_space=2;
-	newdemo_stop_recording();
+	newdemo_stop_recording(0);
 	return -1;
 }
 
@@ -371,6 +383,10 @@ void nd_write_shortpos(object *obj)
 	nd_write_short(sp.vely);
 	nd_write_short(sp.velz);
 }
+
+// Forward declaration: the live playback-rate estimator is defined near the end
+// of the file, but is fed from the frame-event decoder above.
+static void nd_pb_note_delta(int delta);
 
 static void nd_read_byte(sbyte *b)
 {
@@ -842,7 +858,8 @@ void newdemo_record_start_demo()
 {
 	int i;
 
-	nd_record_v_recordframe_last_time=GameTime64-REC_DELAY; // make sure first frame is recorded!
+	newdemo_set_record_delay();
+	nd_record_v_recordframe_last_time=GameTime64-nd_rec_delay; // make sure first frame is recorded!
 
 	stop_time();
 	nd_write_byte(ND_EVENT_START_DEMO);
@@ -888,6 +905,8 @@ void newdemo_record_start_demo()
 	nd_record_v_homing_distance = -1;
 	nd_record_v_primary_ammo = -1;
 	nd_record_v_secondary_ammo = -1;
+	for (i = 0; i < MAX_SECONDARY_WEAPONS; i++)
+		nd_record_v_bomb_ammo[i] = -1;
 
 	for (i = 0; i < MAX_PRIMARY_WEAPONS; i++)
 		nd_write_short((short)Players[Player_num].primary_ammo[i]);
@@ -906,10 +925,11 @@ void newdemo_record_start_demo()
 	nd_record_v_player_shields = (sbyte)(f2ir(Players[Player_num].shields));
 	nd_write_byte((sbyte)(f2ir(Players[Player_num].shields)));
 	nd_record_v_player_afterburner = 0;
+	nd_record_v_player_afterburner_state = Controls.afterburner_state;
 	nd_record_v_player_flags = Players[Player_num].flags;
 	nd_write_int(Players[Player_num].flags);        // be sure players flags are set
-	nd_write_byte((sbyte)Primary_weapon);
-	nd_write_byte((sbyte)Secondary_weapon);
+	nd_write_byte((sbyte)Players[Player_num].primary_weapon);
+	nd_write_byte((sbyte)Players[Player_num].secondary_weapon);
 	nd_record_v_start_frame = nd_record_v_frame_number = 0;
 	nd_record_v_juststarted=1;
 	newdemo_set_new_level(Current_level_num);
@@ -922,23 +942,30 @@ void newdemo_record_start_frame(fix frame_time )
 {
 	int i;
 
+	if (nd_rec_delay != 0)
+		newdemo_set_record_delay();
+
 	if (nd_record_v_no_space) {
 		newdemo_stop_playback();
 		return;
 	}
 
 	// Make demo recording waste a bit less space.
-	// First check if if at least REC_DELAY has passed since last recorded frame. If yes, record frame and set nd_record_v_recordframe true.
+	// First check if if at least nd_rec_delay has passed since last recorded frame. If yes, record frame and set nd_record_v_recordframe true.
 	// nd_record_v_recordframe will be used for various other frame-by-frame events to drop some unnecessary bytes.
 	// frame_time must be modified to get the right playback speed.
 	if (nd_record_v_recordframe_last_time > GameTime64)
-		nd_record_v_recordframe_last_time=GameTime64-REC_DELAY;
+		nd_record_v_recordframe_last_time=GameTime64-nd_rec_delay;
 
-	if (nd_record_v_recordframe_last_time + REC_DELAY <= GameTime64 || frame_time >= REC_DELAY)
+	// Store the real time since the last recorded frame (not this frame's time raised to the
+	// interval): otherwise skipped frames make the recorded timeline run slow and playback stutters.
+	// Accept a frame once 3/4 of the interval has passed so frames at the cap aren't dropped by a hair.
+	if (GameTime64 - nd_record_v_recordframe_last_time >= nd_rec_delay * 3 / 4 || frame_time >= nd_rec_delay)
 	{
-		if (frame_time < REC_DELAY)
-			frame_time = REC_DELAY;
-		nd_record_v_recordframe_last_time = GameTime64-(GameTime64-(nd_record_v_recordframe_last_time + REC_DELAY));
+		const fix64 elapsed = GameTime64 - nd_record_v_recordframe_last_time;
+
+		frame_time = (elapsed > 0 && elapsed < 0x7fffffff) ? (fix)elapsed : nd_rec_delay;
+		nd_record_v_recordframe_last_time = GameTime64;
 		nd_record_v_recordframe=1;
 
 		stop_time();
@@ -1000,7 +1027,23 @@ void newdemo_record_viewer_object(object * obj)
 	nd_record_v_rendering[RenderingType]=1;
 	nd_write_byte(ND_EVENT_VIEWER_OBJECT);
 	nd_write_byte(RenderingType);
+
+	// workaround for observer player with RT_NONE
+	ubyte render_type = obj->render_type;
+	obj->render_type = RT_POLYOBJ;
 	nd_write_object(obj);
+	obj->render_type = render_type;
+
+	// The object record rounds the orientation to 1/128 (about 0.6 degrees), so a smooth live camera
+	// played back in steps. For the main view, append the exact pose; playback applies it over the rounded one.
+	if ((RenderingType & 15) == 0)
+	{
+		nd_write_vector(&obj->pos);
+		nd_write_vector(&obj->orient.rvec);
+		nd_write_vector(&obj->orient.uvec);
+		nd_write_vector(&obj->orient.fvec);
+	}
+
 	start_time();
 }
 
@@ -1193,6 +1236,27 @@ void newdemo_record_player_afterburner(fix afterburner)
 	start_time();
 }
 
+void newdemo_record_player_afterburner_state(ubyte state)
+{
+	if (nd_record_v_player_afterburner_state == state)
+		return;
+	stop_time();
+	nd_write_byte(ND_EVENT_PLAYER_AFTERBURNER_STATE);
+	nd_write_byte(nd_record_v_player_afterburner_state);
+	nd_write_byte(state);
+	nd_record_v_player_afterburner_state = state;
+	start_time();
+}
+
+void newdemo_record_multi_afterburner_stop(ubyte pnum)
+{
+	stop_time();
+	nd_write_byte(ND_EVENT_MULTI_AFTERBURNER_STOP_SIGNATURE);
+	nd_write_byte(pnum);
+	nd_write_int(Players[pnum].objnum >= 0 && Players[pnum].objnum <= Highest_object_index ? Objects[Players[pnum].objnum].signature : -1);
+	start_time();
+}
+
 void newdemo_record_player_shields(int shield)
 {
 	if (nd_record_v_player_shields == shield)
@@ -1225,9 +1289,9 @@ void newdemo_record_player_weapon(int weapon_type, int weapon_num)
 	nd_write_byte((sbyte)weapon_type);
 	nd_write_byte((sbyte)weapon_num);
 	if (weapon_type)
-		nd_write_byte((sbyte)Secondary_weapon);
+		nd_write_byte((sbyte)Players[Player_num].secondary_weapon);
 	else
-		nd_write_byte((sbyte)Primary_weapon);
+		nd_write_byte((sbyte)Players[Player_num].primary_weapon);
 	nd_record_v_weapon_type = weapon_type;
 	nd_record_v_weapon_num = weapon_num;
 	start_time();
@@ -1399,6 +1463,23 @@ void newdemo_record_primary_ammo(int new_ammo)
 		nd_write_short((short)nd_record_v_primary_ammo);
 	nd_write_short((short)new_ammo);
 	nd_record_v_primary_ammo = new_ammo;
+	start_time();
+}
+
+// Unselected bomb ammo: switch to it, ammo event, switch back -- existing events only, so old builds and old demos still work.
+void newdemo_record_bomb_ammo(int bomb)
+{
+	int cur = Players[Player_num].secondary_weapon;
+	int ammo = Players[Player_num].secondary_ammo[bomb];
+	int old = nd_record_v_bomb_ammo[bomb];
+
+	nd_record_v_bomb_ammo[bomb] = ammo;
+	if (old < 0 || old == ammo || bomb == cur) // start table or the selected-ammo event already has it
+		return;
+	stop_time();
+	nd_write_byte(ND_EVENT_PLAYER_WEAPON); nd_write_byte(1); nd_write_byte((sbyte)bomb); nd_write_byte((sbyte)cur);
+	nd_write_byte(ND_EVENT_SECONDARY_AMMO); nd_write_short((short)old); nd_write_short((short)ammo);
+	nd_write_byte(ND_EVENT_PLAYER_WEAPON); nd_write_byte(1); nd_write_byte((sbyte)cur); nd_write_byte((sbyte)bomb);
 	start_time();
 }
 
@@ -1620,7 +1701,7 @@ int newdemo_read_demo_start(enum purpose_type purpose)
 		Game_mode = Newdemo_game_mode;
 		if (purpose != PURPOSE_REWRITE)
 			multi_sort_kill_list();
-		Game_mode = GM_NORMAL;
+		Game_mode = GM_NORMAL | (Game_mode & GM_OBSERVER);
 	} else
 #endif
 	{
@@ -1682,12 +1763,12 @@ int newdemo_read_demo_start(enum purpose_type purpose)
 	if (Players[Player_num].flags & PLAYER_FLAGS_INVULNERABLE)
 		Players[Player_num].invulnerable_time = GameTime64 - (INVULNERABLE_TIME_MAX / 2);
 
-	nd_read_byte((sbyte *)&Primary_weapon);
-	nd_read_byte((sbyte *)&Secondary_weapon);
+	nd_read_byte((sbyte *)&Players[Player_num].primary_weapon);
+	nd_read_byte((sbyte *)&Players[Player_num].secondary_weapon);
 	if (purpose == PURPOSE_REWRITE)
 	{
-		nd_write_byte(Primary_weapon);
-		nd_write_byte(Secondary_weapon);
+		nd_write_byte(Players[Player_num].primary_weapon);
+		nd_write_byte(Players[Player_num].secondary_weapon);
 	}
 
 	Players[Player_num].energy = i2f(energy);
@@ -1727,6 +1808,8 @@ int newdemo_read_frame_information(int rewrite)
 	sbyte c,WhichWindow;
 	object extraobj;
 	segment *seg;
+	bool shields_updated = 0, energy_updated = 0; // Flags to indicate if shields or energy has already been updated when rewinding.  Rewinds should only take the first update.
+	bool afterburner_updated = 0, afterburner_state_updated = 0; // Rewind only the first update of each recorded value.
 
 	done = 0;
 
@@ -1765,6 +1848,11 @@ int newdemo_read_frame_information(int rewrite)
 			}
 			if (Newdemo_vcr_state == ND_STATE_PLAYBACK)
 				nd_recorded_total += nd_recorded_time;
+
+			// Feed the observed interval to the live rate estimate so the HUD
+			// readout follows framerate changes made mid-recording.
+			nd_pb_note_delta((int)nd_recorded_time);
+
 			nd_playback_v_framecount--;
 			break;
 		}
@@ -1794,12 +1882,30 @@ int newdemo_read_frame_information(int rewrite)
 			{
 				//Viewer=&Objects[0];
 				nd_read_object(Viewer);
-				if (nd_playback_v_bad_read) { done = -1; break; }
-				if (rewrite)
 				{
-					nd_write_object(Viewer);
-					break;
+					vms_vector exact_pos, exact_r, exact_u, exact_f;
+
+					nd_read_vector(&exact_pos);
+					nd_read_vector(&exact_r);
+					nd_read_vector(&exact_u);
+					nd_read_vector(&exact_f);
+					if (nd_playback_v_bad_read) { done = -1; break; }
+					if (rewrite)
+					{
+						nd_write_object(Viewer);
+						nd_write_vector(&exact_pos);
+						nd_write_vector(&exact_r);
+						nd_write_vector(&exact_u);
+						nd_write_vector(&exact_f);
+						break;
+					}
+					Viewer->pos = exact_pos;
+					Viewer->orient.rvec = exact_r;
+					Viewer->orient.uvec = exact_u;
+					Viewer->orient.fvec = exact_f;
 				}
+				if (is_observer())
+					Viewer->render_type = RT_NONE;
 
 				if (Newdemo_vcr_state != ND_STATE_PAUSED) {
 					segnum = Viewer->segnum;
@@ -1929,6 +2035,8 @@ int newdemo_read_frame_information(int rewrite)
 				}
 				objnum = newdemo_find_object( signature );
 				if ( objnum > -1 && Newdemo_vcr_state == ND_STATE_PLAYBACK)  {   //  @mk, 2/22/96, John told me to.
+					if (soundno == SOUND_AFTERBURNER_IGNITE)
+						digi_kill_sound_linked_to_object_sound(objnum, SOUND_AFTERBURNER_IGNITE);
 					digi_link_sound_to_object3( soundno, objnum, 1, max_volume, max_distance, loop_start, loop_end );
 				}
 			}
@@ -2145,8 +2253,10 @@ int newdemo_read_frame_information(int rewrite)
 			if ((Newdemo_vcr_state == ND_STATE_PLAYBACK) || (Newdemo_vcr_state == ND_STATE_FASTFORWARD) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEFORWARD)) {
 				Players[Player_num].energy = i2f(energy);
 			} else if ((Newdemo_vcr_state == ND_STATE_REWINDING) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEBACKWARD)) {
-				if (old_energy != 255)
+				if (!energy_updated && old_energy != 255) {
 					Players[Player_num].energy = i2f(old_energy);
+					energy_updated = 1;
+				}
 			}
 			break;
 		}
@@ -2165,11 +2275,75 @@ int newdemo_read_frame_information(int rewrite)
 				break;
 			}
 			if ((Newdemo_vcr_state == ND_STATE_PLAYBACK) || (Newdemo_vcr_state == ND_STATE_FASTFORWARD) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEFORWARD)) {
-				Afterburner_charge = afterburner<<9;
+				Players[Player_num].afterburner_charge = afterburner<<9;
 // 				if (Afterburner_charge < 0) Afterburner_charge=f1_0;
 			} else if ((Newdemo_vcr_state == ND_STATE_REWINDING) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEBACKWARD)) {
-				if (old_afterburner != 255)
-					Afterburner_charge = old_afterburner<<9;
+				if (!afterburner_updated && old_afterburner != 255) {
+					Players[Player_num].afterburner_charge = old_afterburner<<9;
+					afterburner_updated = 1;
+				}
+			}
+			break;
+		}
+
+		case ND_EVENT_PLAYER_AFTERBURNER_STATE: {
+			ubyte old_state, state;
+
+			nd_read_byte((sbyte *)&old_state);
+			nd_read_byte((sbyte *)&state);
+			if (nd_playback_v_bad_read) { done = -1; break; }
+			if (rewrite) {
+				nd_write_byte(old_state);
+				nd_write_byte(state);
+				break;
+			}
+			if ((Newdemo_vcr_state == ND_STATE_PLAYBACK) || (Newdemo_vcr_state == ND_STATE_FASTFORWARD) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEFORWARD)) {
+				Controls.afterburner_state = state;
+				if (!state)
+				digi_kill_sound_linked_to_object_sound(Players[Player_num].objnum, SOUND_AFTERBURNER_IGNITE);
+			} else if ((Newdemo_vcr_state == ND_STATE_REWINDING) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEBACKWARD)) {
+				if (!afterburner_state_updated) {
+					Controls.afterburner_state = old_state;
+					if (!old_state)
+						digi_kill_sound_linked_to_object(Players[Player_num].objnum);
+					afterburner_state_updated = 1;
+				}
+			}
+			break;
+		}
+
+		case ND_EVENT_MULTI_AFTERBURNER_STOP: {
+			ubyte pnum;
+
+			nd_read_byte((sbyte *)&pnum);
+			if (nd_playback_v_bad_read) { done = -1; break; }
+			if (rewrite) {
+				nd_write_byte(pnum);
+				break;
+			}
+			if (((Newdemo_vcr_state == ND_STATE_PLAYBACK) || (Newdemo_vcr_state == ND_STATE_FASTFORWARD) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEFORWARD)) && pnum < MAX_PLAYERS) {
+				digi_kill_sound_linked_to_object_sound(Players[pnum].objnum, SOUND_AFTERBURNER_IGNITE);
+			}
+			break;
+		}
+
+		case ND_EVENT_MULTI_AFTERBURNER_STOP_SIGNATURE: {
+			ubyte pnum;
+			int signature;
+
+			nd_read_byte((sbyte *)&pnum);
+			nd_read_int(&signature);
+			if (nd_playback_v_bad_read) { done = -1; break; }
+			if (rewrite) {
+				nd_write_byte(pnum);
+				nd_write_int(signature);
+				break;
+			}
+			if ((Newdemo_vcr_state == ND_STATE_PLAYBACK) || (Newdemo_vcr_state == ND_STATE_FASTFORWARD) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEFORWARD)) {
+				if (signature >= 0)
+					digi_kill_sound_linked_to_object_signature_sound(signature, SOUND_AFTERBURNER_IGNITE);
+				else if (pnum < MAX_PLAYERS)
+					digi_kill_sound_linked_to_object_sound(Players[pnum].objnum, SOUND_AFTERBURNER_IGNITE);
 			}
 			break;
 		}
@@ -2190,8 +2364,10 @@ int newdemo_read_frame_information(int rewrite)
 			if ((Newdemo_vcr_state == ND_STATE_PLAYBACK) || (Newdemo_vcr_state == ND_STATE_FASTFORWARD) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEFORWARD)) {
 				Players[Player_num].shields = i2f(shield);
 			} else if ((Newdemo_vcr_state == ND_STATE_REWINDING) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEBACKWARD)) {
-				if (old_shield != 255)
+				if (!shields_updated && old_shield != 255) {
 					Players[Player_num].shields = i2f(old_shield);
+					shields_updated = 1;
+				}
 			}
 			break;
 		}
@@ -2254,14 +2430,14 @@ int newdemo_read_frame_information(int rewrite)
 			}
 			if ((Newdemo_vcr_state == ND_STATE_PLAYBACK) || (Newdemo_vcr_state == ND_STATE_FASTFORWARD) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEFORWARD)) {
 				if (weapon_type == 0)
-					Primary_weapon = (int)weapon_num;
+					Players[Player_num].primary_weapon = (int)weapon_num;
 				else
-					Secondary_weapon = (int)weapon_num;
+					Players[Player_num].secondary_weapon = (int)weapon_num;
 			} else if ((Newdemo_vcr_state == ND_STATE_REWINDING) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEBACKWARD)) {
 				if (weapon_type == 0)
-					Primary_weapon = (int)old_weapon;
+					Players[Player_num].primary_weapon = (int)old_weapon;
 				else
-					Secondary_weapon = (int)old_weapon;
+					Players[Player_num].secondary_weapon = (int)old_weapon;
 			}
 			break;
 		}
@@ -2301,7 +2477,7 @@ int newdemo_read_frame_information(int rewrite)
 				nd_write_short(distance);
 				break;
 			}
-			Players[Player_num].homing_object_dist = i2f((int)(distance << 16));
+			Players[Player_num].homing_object_dist = distance << 16;
 			break;
 		}
 
@@ -2470,7 +2646,7 @@ int newdemo_read_frame_information(int rewrite)
 			}
 			Game_mode = Newdemo_game_mode;
 			multi_sort_kill_list();
-			Game_mode = GM_NORMAL;
+			Game_mode = GM_NORMAL | (Game_mode & GM_OBSERVER);
 			break;
 		}
 
@@ -2501,6 +2677,11 @@ int newdemo_read_frame_information(int rewrite)
 			}
 			if ((Newdemo_vcr_state == ND_STATE_REWINDING) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEBACKWARD)) {
 				Players[pnum].connected = CONNECT_DISCONNECTED;
+
+				if (Current_obs_player == pnum) {
+					reset_obs();
+				}
+
 				if (!new_player) {
 					memcpy(Players[pnum].callsign, old_callsign, CALLSIGN_LEN+1);
 					Players[pnum].net_killed_total = killed_total;
@@ -2528,9 +2709,13 @@ int newdemo_read_frame_information(int rewrite)
 				nd_write_byte(pnum);
 				break;
 			}
-			if ((Newdemo_vcr_state == ND_STATE_REWINDING) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEBACKWARD))
+			if ((Newdemo_vcr_state == ND_STATE_REWINDING) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEBACKWARD)) {
 				Players[pnum].connected = CONNECT_DISCONNECTED;
-			else if ((Newdemo_vcr_state == ND_STATE_PLAYBACK) || (Newdemo_vcr_state == ND_STATE_FASTFORWARD) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEFORWARD))
+
+				if (Current_obs_player == pnum) {
+					reset_obs();
+				}
+			} else if ((Newdemo_vcr_state == ND_STATE_PLAYBACK) || (Newdemo_vcr_state == ND_STATE_FASTFORWARD) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEFORWARD))
 				Players[pnum].connected = CONNECT_PLAYING;
 			break;
 		}
@@ -2546,8 +2731,13 @@ int newdemo_read_frame_information(int rewrite)
 			}
 			if ((Newdemo_vcr_state == ND_STATE_REWINDING) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEBACKWARD))
 				Players[pnum].connected = CONNECT_PLAYING;
-			else if ((Newdemo_vcr_state == ND_STATE_PLAYBACK) || (Newdemo_vcr_state == ND_STATE_FASTFORWARD) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEFORWARD))
+			else if ((Newdemo_vcr_state == ND_STATE_PLAYBACK) || (Newdemo_vcr_state == ND_STATE_FASTFORWARD) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEFORWARD)) {
 				Players[pnum].connected = CONNECT_DISCONNECTED;
+
+				if (Current_obs_player == pnum) {
+					reset_obs();
+				}
+			}
 			break;
 		}
 
@@ -2605,12 +2795,12 @@ int newdemo_read_frame_information(int rewrite)
 
 			// NOTE: Used (Primary_weapon==GAUSS_INDEX?VULCAN_INDEX:Primary_weapon) because game needs VULCAN_INDEX updated to show Gauss ammo
 			if ((Newdemo_vcr_state == ND_STATE_REWINDING) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEBACKWARD))
-				Players[Player_num].primary_ammo[(Primary_weapon==GAUSS_INDEX?VULCAN_INDEX:Primary_weapon)] = old_ammo;
+				Players[Player_num].primary_ammo[(Players[Player_num].primary_weapon==GAUSS_INDEX?VULCAN_INDEX:Players[Player_num].primary_weapon)] = old_ammo;
 			else if ((Newdemo_vcr_state == ND_STATE_PLAYBACK) || (Newdemo_vcr_state == ND_STATE_FASTFORWARD) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEFORWARD))
-				Players[Player_num].primary_ammo[(Primary_weapon==GAUSS_INDEX?VULCAN_INDEX:Primary_weapon)] = new_ammo;
+				Players[Player_num].primary_ammo[(Players[Player_num].primary_weapon==GAUSS_INDEX?VULCAN_INDEX:Players[Player_num].primary_weapon)] = new_ammo;
 
-			if (Primary_weapon == OMEGA_INDEX) // If Omega cannon, we need to update Omega_charge - not stored in primary_ammo
-				Omega_charge = (Players[Player_num].primary_ammo[Primary_weapon]<=0?f1_0:Players[Player_num].primary_ammo[Primary_weapon]);
+			if (Players[Player_num].primary_weapon == OMEGA_INDEX) // If Omega cannon, we need to update Omega_charge - not stored in primary_ammo
+				Omega_charge = (Players[Player_num].primary_ammo[Players[Player_num].primary_weapon]<=0?f1_0:Players[Player_num].primary_ammo[Players[Player_num].primary_weapon]);
 			break;
 		}
 
@@ -2627,9 +2817,9 @@ int newdemo_read_frame_information(int rewrite)
 			}
 
 			if ((Newdemo_vcr_state == ND_STATE_REWINDING) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEBACKWARD))
-				Players[Player_num].secondary_ammo[Secondary_weapon] = old_ammo;
+				Players[Player_num].secondary_ammo[Players[Player_num].secondary_weapon] = old_ammo;
 			else if ((Newdemo_vcr_state == ND_STATE_PLAYBACK) || (Newdemo_vcr_state == ND_STATE_FASTFORWARD) || (Newdemo_vcr_state == ND_STATE_ONEFRAMEFORWARD))
-				Players[Player_num].secondary_ammo[Secondary_weapon] = new_ammo;
+				Players[Player_num].secondary_ammo[Players[Player_num].secondary_weapon] = new_ammo;
 			break;
 		}
 
@@ -2819,7 +3009,7 @@ int newdemo_read_frame_information(int rewrite)
 
 				if (Game_mode & GM_CAPTURE || Game_mode & GM_HOARD)
 					multi_apply_goal_textures ();
-				Game_mode = GM_NORMAL;
+				Game_mode = GM_NORMAL | (Game_mode & GM_OBSERVER);
 #endif
 			}
 
@@ -2830,6 +3020,7 @@ int newdemo_read_frame_information(int rewrite)
 			full_palette_save();				// initialise for palette_restore()
 
 			start_time();
+			reset_time(); // stop FrameTime spikes that mess up interpolation
 			break;
 		}
 
@@ -2850,28 +3041,29 @@ int newdemo_read_frame_information(int rewrite)
 	if (nd_playback_v_dead)
 	{
 		Rear_view = 0;
-		if (PlayerCfg.CockpitMode[1] != CM_LETTERBOX)
+		if (PlayerCfg.CurrentCockpitMode != CM_LETTERBOX)
 			select_cockpit(CM_LETTERBOX);
 	}
 	else if (nd_playback_v_guided)
 	{
 		Rear_view = 0;
-		if (PlayerCfg.CockpitMode[1] != CM_FULL_SCREEN || PlayerCfg.CockpitMode[1] != CM_STATUS_BAR)
+		if (PlayerCfg.CurrentCockpitMode != CM_FULL_SCREEN || PlayerCfg.CurrentCockpitMode != CM_STATUS_BAR)
 		{
-			select_cockpit((PlayerCfg.CockpitMode[0] == CM_FULL_SCREEN)?CM_FULL_SCREEN:CM_STATUS_BAR);
+			select_cockpit((PlayerCfg.PreferredCockpitMode == CM_FULL_SCREEN)?CM_FULL_SCREEN:CM_STATUS_BAR);
 		}
 	}
 	else if (nd_playback_v_rear)
 	{
 		Rear_view = nd_playback_v_rear;
-		if (PlayerCfg.CockpitMode[0] == CM_FULL_COCKPIT)
+		if (PlayerCfg.PreferredCockpitMode == CM_FULL_COCKPIT)
 			select_cockpit(CM_REAR_VIEW);
 	}
 	else
 	{
 		Rear_view = 0;
-		if (PlayerCfg.CockpitMode[1] != PlayerCfg.CockpitMode[0])
-			select_cockpit(PlayerCfg.CockpitMode[0]);
+		// init_cockpit forces full screen for an observer without a cockpit; reselecting the preferred mode every frame would rebuild the canvases each time
+		if (PlayerCfg.CurrentCockpitMode != PlayerCfg.PreferredCockpitMode && !(is_observer() && !can_draw_observer_cockpit()))
+			select_cockpit(PlayerCfg.PreferredCockpitMode);
 	}
 
 	if (nd_playback_v_bad_read) {
@@ -2954,8 +3146,8 @@ void newdemo_goto_end(int to_rewrite)
 	}
 	if (Players[Player_num].flags & PLAYER_FLAGS_INVULNERABLE)
 		Players[Player_num].invulnerable_time = GameTime64 - (INVULNERABLE_TIME_MAX / 2);
-	nd_read_byte((sbyte *)&Primary_weapon);
-	nd_read_byte((sbyte *)&Secondary_weapon);
+	nd_read_byte((sbyte *)&Players[Player_num].primary_weapon);
+	nd_read_byte((sbyte *)&Players[Player_num].secondary_weapon);
 	for (i = 0; i < MAX_PRIMARY_WEAPONS; i++)
 		nd_read_short((short *)&(Players[Player_num].primary_ammo[i]));
 	for (i = 0; i < MAX_SECONDARY_WEAPONS; i++)
@@ -3036,12 +3228,32 @@ void newdemo_back_frames(int frames)
  *  at.
 */
 
+// -demolog: one line per played frame to demo.log (cwd), to find what makes playback step.
+static int nd_log_catchup;	// recorded frames read ahead since the last log line
+
+static void nd_demo_log(fix factor, fix d_play, fix d_recorded, int matched, int total, int viewer_matched, fix viewer_step)
+{
+	static FILE *f;
+	static fix64 last;
+	const fix64 now = timer_query();
+
+	if (!f && !(f = fopen("demo.log", "a")))
+		return;
+	fprintf(f, "t=%.4f dt_ms=%.2f factor=%.3f d_play_ms=%.2f d_rec_ms=%.2f catchup=%d matched=%d/%d viewer=%d vstep=%.4f\n",
+		f2fl(now), last ? f2fl(now - last) * 1000 : 0.0, f2fl(factor), f2fl(d_play) * 1000, f2fl(d_recorded) * 1000,
+		nd_log_catchup, matched, total, viewer_matched, f2fl(viewer_step));
+	fflush(f);	// readable while the game is still running
+	last = now;
+	nd_log_catchup = 0;
+}
+
 void interpolate_frame(fix d_play, fix d_recorded)
 {
 	int i, j, num_cur_objs;
+	int log_matched = 0, log_viewer = 0;
+	fix log_vstep = 0;
 	fix factor;
 	object *cur_objs;
-	static fix InterpolStep = fl2f(.01);
 
 	if (nd_playback_v_framecount < 1)
 		return;
@@ -3066,10 +3278,7 @@ void interpolate_frame(fix d_play, fix d_recorded)
 		return;
 	}
 
-	InterpolStep -= FrameTime;
-
-	// This interpolating looks just more crappy on high FPS, so let's not even waste performance on it.
-	if (InterpolStep <= 0)
+	// Interpolate every frame: throttling it to 100Hz froze motion between steps at high FPS.
 	{
 		for (i = 0; i <= num_cur_objs; i++) {
 			for (j = 0; j <= Highest_object_index; j++) {
@@ -3116,11 +3325,23 @@ void interpolate_frame(fix d_play, fix d_recorded)
 					cur_objs[i].pos.x += delta_x;
 					cur_objs[i].pos.y += delta_y;
 					cur_objs[i].pos.z += delta_z;
+
+					log_matched++;
+					if (Viewer && i == Viewer - Objects)
+					{
+						vms_vector dv;
+
+						dv.x = delta_x; dv.y = delta_y; dv.z = delta_z;
+						log_viewer = 1;
+						log_vstep = vm_vec_mag(&dv);
+					}
 				}
 			}
 		}
-		InterpolStep = fl2f(.01);
 	}
+
+	if (GameArg.DemoLog)
+		nd_demo_log(factor, d_play, d_recorded, log_matched, num_cur_objs + 1, log_viewer, log_vstep);
 
 	// get back to original position in the demo file.  Reread the current
 	// frame information again to reset all of the object stuff not covered
@@ -3137,6 +3358,15 @@ void interpolate_frame(fix d_play, fix d_recorded)
 		memcpy(&(Objects[i]), &(cur_objs[i]), sizeof(object));
 	Highest_object_index = num_cur_objs;
 	d_free(cur_objs);
+
+	// The interpolated viewer keeps the previous frame's segment while its position moves toward
+	// the next one; rendering starts from that segment, so it popped at every segment border.
+	if (Viewer && Viewer->segnum >= 0) {
+		const int seg = find_point_seg(&Viewer->pos, Viewer->segnum);
+
+		if (seg != -1 && seg != Viewer->segnum)
+			obj_relink(Viewer - Objects, seg);
+	}
 }
 
 void newdemo_playback_one_frame()
@@ -3168,8 +3398,12 @@ void newdemo_playback_one_frame()
 			newdemo_goto_beginning();
 			return;
 		}
-		if (Newdemo_vcr_state == ND_STATE_REWINDING)
-			frames_back = 10;
+		if (Newdemo_vcr_state == ND_STATE_REWINDING) {
+			// Scale step dynamically to provide rapid seeking regardless of high frame ceilings
+			int target_fps = PlayerCfg.maxFps > 0 ? PlayerCfg.maxFps : 60;
+			frames_back = (target_fps > 60) ? (target_fps / 3) : 10;
+			if (frames_back < 10) frames_back = 10;
+		}
 		else
 			frames_back = 1;
 		if (nd_playback_v_at_eof) {
@@ -3189,7 +3423,11 @@ void newdemo_playback_one_frame()
 	else if (Newdemo_vcr_state == ND_STATE_FASTFORWARD) {
 		if (!nd_playback_v_at_eof)
 		{
-			for (i = 0; i < 10; i++)
+			int target_fps = PlayerCfg.maxFps > 0 ? PlayerCfg.maxFps : 60;
+			int ff_steps = (target_fps > 60) ? (target_fps / 3) : 10;
+			if (ff_steps < 10) ff_steps = 10;
+
+			for (i = 0; i < ff_steps; i++)
 			{
 				if (newdemo_read_frame_information(0) == -1)
 				{
@@ -3296,6 +3534,7 @@ void newdemo_playback_one_frame()
 					}
 					d_free(cur_objs);
 					d_recorded += nd_recorded_time;
+					nd_log_catchup++;
 					base_interpol_time = nd_playback_total - FrameTime;
 				}
 			}
@@ -3321,13 +3560,34 @@ void newdemo_playback_one_frame()
 	}
 }
 
-void newdemo_start_recording()
+static void newdemo_set_record_delay(void)
 {
+	int record_fps = PlayerCfg.maxFps;
+
+	if (record_fps <= 0)
+		record_fps = MAXIMUM_FPS;
+	if (record_fps > MAXIMUM_FPS)
+		record_fps = MAXIMUM_FPS;
+
+	nd_rec_delay = F1_0 / record_fps;
+	if (nd_rec_delay < 1)
+		nd_rec_delay = 1;
+}
+
+void newdemo_start_recording(int is_autorecord)
+{
+	newdemo_set_record_delay();
+
 	Newdemo_num_written = 0;
 	nd_record_v_no_space=0;
 	Newdemo_state = ND_STATE_RECORDING;
+	Newdemo_is_autorecord = is_autorecord;
 
 	PHYSFS_mkdir(DEMO_DIR); //always try making directory - could only exist in read-only path
+
+	if(PHYSFSX_exists(DEMO_FILENAME, 0)) {
+		PHYSFSX_rename(DEMO_FILENAME, "demos/tmp2.dem");
+	}
 
 	outfile = PHYSFSX_openWriteBuffered(DEMO_FILENAME);
 
@@ -3366,8 +3626,8 @@ void newdemo_write_end()
 	nd_write_byte((sbyte)(f2ir(Players[Player_num].energy)));
 	nd_write_byte((sbyte)(f2ir(Players[Player_num].shields)));
 	nd_write_int(Players[Player_num].flags);        // be sure players flags are set
-	nd_write_byte((sbyte)Primary_weapon);
-	nd_write_byte((sbyte)Secondary_weapon);
+	nd_write_byte((sbyte)Players[Player_num].primary_weapon);
+	nd_write_byte((sbyte)Players[Player_num].secondary_weapon);
 	byte_count += 8;
 
 	for (i = 0; i < MAX_PRIMARY_WEAPONS; i++)
@@ -3406,16 +3666,135 @@ void newdemo_write_end()
 	nd_write_byte(ND_EVENT_EOF);
 }
 
-char demoname_allowed_chars[] = "azAZ09__--";
-void newdemo_stop_recording()
+// Removes invalid characters from a filename.
+void newdemo_clean_filename(char* filename_buffer, unsigned int filename_buffer_length)
 {
-	newmenu_item m[6];
-	int exit;
-	static char filename[PATH_MAX] = "", *s;
-	static sbyte tmpcnt = 0;
-	char fullname[PATH_MAX] = DEMO_DIR;
+	size_t len = strnlen(filename_buffer, filename_buffer_length);
+	for (char* fc = filename_buffer; *fc;) {
+		if (!isalnum(*fc) && *fc != '_') {
+			size_t bytes_to_move = len + filename_buffer - fc - 1;
+			memmove(fc, fc + 1, bytes_to_move);
+			fc[bytes_to_move] = 0;
+		} else {
+			fc++;
+		}
+	}
+}
 
-	exit = 0;
+// Checks whether a demo filename is valid, notifying the player if not.
+int newdemo_validate_filename(const char* filename_buffer, unsigned int filename_buffer_length)
+{
+	if (filename_buffer[0] == 0) // empty string
+		return 0;
+
+	//check to make sure name is ok
+	for (const char* s = filename_buffer; *s; s++)
+		if (!isalnum(*s) && *s != '_') {
+			nm_messagebox(NULL, 1, TXT_CONTINUE, TXT_DEMO_USE_LETTERS);
+			return 0;
+		}
+
+	return 1;
+}
+
+#define MAX_DEMO_NAME_ATTEMPTS 255
+void newdemo_get_default_filename(char* filename_buffer, unsigned int filename_buffer_length)
+{
+	char basename[PATH_MAX] = "";
+
+	if (Game_mode & GM_MULTI) {
+		// Multiplayer game; use the game type, who we're playing against, etc.
+		if (is_observer()) {
+			sprintf_s(basename, SDL_arraysize(basename), "%s_OBS_%s", Players[Player_num].callsign, Netgame.mission_name);
+		} else if(Game_mode & GM_MULTI_COOP) {
+			sprintf_s(basename, SDL_arraysize(basename), "%s_COOP_%s", Players[Player_num].callsign, Netgame.mission_name);
+		}
+		// Was this a 1v1? Checking callsigns instead of player count to handle the case where players leave.
+		else if (strlen(Players[0].callsign) && strlen(Players[1].callsign) && !strlen(Players[2].callsign)) {
+			int me = Player_num;
+			int you = Player_num ? 0 : 1;
+			sprintf_s(basename, SDL_arraysize(basename), "%s_%s_%d_%d_%s",
+				Players[Player_num].callsign, Players[you].callsign, Players[me].net_kills_total, Players[you].net_kills_total, Netgame.mission_name);
+		} else {
+			sprintf_s(basename, SDL_arraysize(basename), "%s_ANARCHY_%s", Players[Player_num].callsign, Netgame.mission_name);
+		}
+	} else {
+		// Single-player game; use our name, the name of the mission, and the date.
+		time_t now = time(NULL);
+		struct tm* t = localtime(&now);
+		sprintf_s(basename, SDL_arraysize(basename), "%s_%s_%04d%02d%02d",
+			Players[Player_num].callsign, Current_mission_filename, t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
+	}
+
+	// Remove invalid characters, because map names can include invalid characters.
+	newdemo_clean_filename(basename, SDL_arraysize(basename));
+
+	// Try to make sure the filename is unique; try appending numbers if there's a collision.
+	for (int attemptnum = 1; attemptnum <= MAX_DEMO_NAME_ATTEMPTS; attemptnum++)
+	{
+		char testpath[PATH_MAX] = "";
+		if (attemptnum > 1)
+			sprintf_s(testpath, SDL_arraysize(testpath), DEMO_DIR "%s_%d" DEMO_EXT, basename, attemptnum);
+		else
+			sprintf_s(testpath, SDL_arraysize(testpath), DEMO_DIR "%s" DEMO_EXT, basename);
+
+		if (!PHYSFSX_exists(testpath, 0)) {
+			if (attemptnum > 1)
+				sprintf_s(filename_buffer, filename_buffer_length, "%s_%d", basename, attemptnum);
+			else
+				strcpy_s(filename_buffer, filename_buffer_length, basename);
+			break;
+		}
+	}
+
+	if (filename_buffer[0] == '\0')
+		// Ran out of attempts. Just overwrite the old file
+		sprintf_s(filename_buffer, filename_buffer_length, "%s_%d", basename, MAX_DEMO_NAME_ATTEMPTS);
+
+	con_printf(CON_NORMAL, "Got default demo file name: %s\n", filename_buffer);
+}
+
+int newdemo_prompt_filename(char* filename_buffer, unsigned int filename_buffer_length)
+{
+	char filename_from_prompt[PATH_MAX] = "";
+	strcpy_s(filename_from_prompt, SDL_arraysize(filename_from_prompt), filename_buffer);
+
+	do {
+		newmenu_item m[2];
+		int exit = 0;
+		Newmenu_allowed_chars = "azAZ09__";
+		if (!nd_record_v_no_space) {
+			m[0].type = NM_TYPE_INPUT;
+			m[0].text_len = SDL_arraysize(filename_from_prompt) - 1;
+			m[0].text = filename_from_prompt;
+			exit = newmenu_do(NULL, TXT_SAVE_DEMO_AS, 1, m, NULL, NULL);
+		} else if (nd_record_v_no_space == 2) {
+			m[0].type = NM_TYPE_TEXT;
+			m[0].text = TXT_DEMO_SAVE_NOSPACE;
+			m[1].type = NM_TYPE_INPUT;
+			m[1].text_len = SDL_arraysize(filename_from_prompt) - 1;
+			m[1].text = filename_from_prompt;
+			exit = newmenu_do(NULL, NULL, 2, m, NULL, NULL);
+		}
+		Newmenu_allowed_chars = NULL;
+
+		if (exit == -2) { // got bumped out from network menu
+			return 1; // Just use the default filename
+		}
+		if (exit == -1) { // pressed ESC
+			HUD_init_message_literal(HM_DEFAULT | HM_MULTI, "Demo saved as tmpdemo.dem");
+			return 0; // tell caller not to move the demo
+		}
+	} while (!newdemo_validate_filename(filename_from_prompt, SDL_arraysize(filename_from_prompt)));
+
+	strcpy_s(filename_buffer, filename_buffer_length, filename_from_prompt);
+	return 1;
+}
+
+void newdemo_stop_recording(int is_manual)
+{
+	char demo_name[PATH_MAX] = "";
+	int was_autorecord = Newdemo_is_autorecord;
 
 	if (!nd_record_v_no_space)
 	{
@@ -3426,76 +3805,178 @@ void newdemo_stop_recording()
 	PHYSFS_close(outfile);
 	outfile = NULL;
 	Newdemo_state = ND_STATE_NORMAL;
+	Newdemo_is_autorecord = 0;
 	gr_palette_load( gr_palette );
 
-	if (filename[0] != '\0') {
-		int num, i = strlen(filename) - 1;
-		char newfile[PATH_MAX];
+	newdemo_get_default_filename(demo_name, SDL_arraysize(demo_name));
+	// If we're suppressing auto-record UI, don't ask for the name, just use the default.
+	// If the player presses F5 while auto-recording, we do prompt for a name though.
+	if (is_manual || !was_autorecord || !PlayerCfg.AutoDemoHideUi)
+		if (!newdemo_prompt_filename(demo_name, SDL_arraysize(demo_name)))
+			return;
 
-		while (isdigit(filename[i])) {
-			i--;
-			if (i == -1)
-				break;
-		}
-		i++;
-		num = atoi(&(filename[i]));
-		num++;
-		filename[i] = '\0';
-		sprintf (newfile, "%s%d", filename, num);
-		strncpy(filename, newfile, PATH_MAX);
-		filename[PATH_MAX - 1] = '\0';
-	}
+	// Add path and extension to the file name
+	char filename[PATH_MAX] = "";
+	sprintf_s(filename, SDL_arraysize(filename), DEMO_DIR "%s" DEMO_EXT, demo_name);
 
-try_again:
-	;
-
-	Newmenu_allowed_chars = demoname_allowed_chars;
-	if (!nd_record_v_no_space) {
-		m[0].type=NM_TYPE_INPUT; m[0].text_len = PATH_MAX - 1; m[0].text = filename;
-		exit = newmenu_do( NULL, TXT_SAVE_DEMO_AS, 1, &(m[0]), NULL, NULL );
-	} else if (nd_record_v_no_space == 2) {
-		m[ 0].type = NM_TYPE_TEXT; m[ 0].text = TXT_DEMO_SAVE_NOSPACE;
-		m[ 1].type = NM_TYPE_INPUT;m[ 1].text_len = PATH_MAX - 1; m[1].text = filename;
-		exit = newmenu_do( NULL, NULL, 2, m, NULL, NULL );
-	}
-	Newmenu_allowed_chars = NULL;
-
-	if (exit == -2) {                   // got bumped out from network menu
-		char save_file[PATH_MAX];
-
-		if (filename[0] != '\0') {
-			strcpy(save_file, DEMO_DIR);
-			strcat(save_file, filename);
-			strcat(save_file, DEMO_EXT);
-		} else
-			sprintf (save_file, "%stmp%d.dem", DEMO_DIR, tmpcnt++);
-		remove(save_file);
-		PHYSFSX_rename(DEMO_FILENAME, save_file);
-		return;
-	}
-	if (exit == -1) {               // pressed ESC
-		PHYSFS_delete(DEMO_FILENAME);   // might as well remove the file
-		return;                     // return without doing anything
-	}
-
-	if (filename[0]==0) //null string
-		goto try_again;
-
-	//check to make sure name is ok
-	for (s=filename;*s;s++)
-		if (!isalnum(*s) && *s!='_') {
-			nm_messagebox(NULL, 1,TXT_CONTINUE, TXT_DEMO_USE_LETTERS);
-			goto try_again;
-		}
-
-	if (nd_record_v_no_space)
-		strcat(fullname, m[1].text);
-	else
-		strcat(fullname, m[0].text);
-	strcat(fullname, DEMO_EXT);
-	PHYSFS_delete(fullname);
-	PHYSFSX_rename(DEMO_FILENAME, fullname);
+	PHYSFS_delete(filename);
+	PHYSFSX_rename(DEMO_FILENAME, filename);
 }
+
+// Reported framerate of the demo currently being played, in frames per second.
+// Determined from the per-frame intervals stored in the demo itself, not from
+// the rate the viewer happens to be running at.
+//
+// Purely informational: playback speed is wall-clock based and does not depend
+// on it. It is shown next to the live FPS during playback so a viewer can
+// compare, e.g. a demo captured at 320 against the framerate they are currently
+// running.
+//
+// Returns 0 if the rate cannot be determined.
+int newdemo_get_recorded_fps(char *filename)
+{
+	PHYSFS_File *f;
+	char path[PATH_MAX+FILENAME_LEN];
+	ubyte hdr[10];
+	// Histogram of observed deltas. A demo records a near-constant interval, so
+	// the true delta forms a tall spike. Stray 0x02 bytes inside other events'
+	// payloads also masquerade as frame headers but yield scattered, unrelated
+	// deltas -- taking the MODE rejects those false positives, whereas
+	// averaging them dragged the result far off (a 167fps demo reported 48fps,
+	// because bogus 65536-tick "1fps" deltas outnumbered the real ones).
+	enum { MAX_DELTA_BINS = 4096 };
+	int hist[MAX_DELTA_BINS];
+	int best_delta = 0, best_count = 0;
+	int scanned = 0;
+
+	if (!filename)
+		return 0;
+
+	strcpy(path, DEMO_DIR);
+	strcat(path, filename);
+
+	f = PHYSFSX_openReadBuffered(path);
+	if (!f)
+		return 0;
+
+	memset(hist, 0, sizeof(hist));
+
+	// Scan a bounded prefix -- enough to build a clear spike without reading a
+	// multi-megabyte file end to end.
+	while (scanned < 4000000)
+	{
+		ubyte ev;
+		int delta;
+
+		scanned++;
+
+		if (PHYSFSX_read(f, &ev, 1, 1) != 1)
+			break;								// EOF
+
+		if (ev != ND_EVENT_START_FRAME)
+			continue;
+
+		if (PHYSFSX_read(f, hdr, 10, 1) != 1)
+			break;
+
+		// hdr layout: [0..1] uint16 length, [2..5] int32 frame number,
+		// [6..9] int32 recorded time delta.
+		delta = (int)((Uint32)hdr[6] | ((Uint32)hdr[7] << 8)
+			| ((Uint32)hdr[8] << 16) | ((Uint32)hdr[9] << 24));
+
+		// Only plausible intervals: positive, at least ~1ms (65 ticks, i.e.
+		// 1000fps) so noise is excluded, and within the histogram.
+		if (delta < 65 || delta >= MAX_DELTA_BINS)
+			continue;
+
+		// Coarse bins (16 ticks, ~0.25 ms): real intervals jitter by a few ticks, so exact
+		// values never form a spike. The bin centre is the estimate.
+		hist[delta >> 4]++;
+		if (hist[delta >> 4] > best_count)
+		{
+			best_count = hist[delta >> 4];
+			best_delta = ((delta >> 4) << 4) + 8;
+		}
+	}
+
+	PHYSFS_close(f);
+
+	// Require a real spike, not a one-off coincidence.
+	if (best_delta <= 0 || best_count < 8)
+		return 0;
+
+	// best_delta is a per-frame interval in fix ticks, where F1_0 ticks ==
+	// one second. So fps = F1_0 / best_delta.
+	//
+	// Do NOT multiply by F1_0 a second time: (F1_0 * F1_0) / best_delta
+	// returns 10956549 for a 392-tick (167fps) interval -- a 65536x error.
+	return (int)(((fix64)F1_0) / best_delta);
+}
+
+// Running estimate of the rate at which the demo currently being played was
+// recorded.
+//
+// A single upfront scan (newdemo_get_recorded_fps) is not enough: a demo may
+// change framerate partway through (e.g. recorded 320, then 250, then 167, then
+// 60), so one number cannot describe the whole file. This tracks a sliding
+// window of the MOST RECENT intervals and reports the dominant one, so the
+// readout follows the demo as it crosses each rate change.
+//
+// A sliding window is essential. An accumulating histogram never forgets: the
+// first rate kept the highest count forever, so every change lagged one stage
+// behind (record 320 -> menu 250 -> menu 167 -> menu 60 displayed 320, 250,
+// 167, 60, only catching up after re-entering the menu, which reset it).
+//
+// Reset when playback (re)starts.
+enum { ND_PB_WINDOW = 48 };
+static int nd_pb_ring[ND_PB_WINDOW];
+static int nd_pb_pos;
+static int nd_pb_filled;
+
+// Feed one recorded-frame interval (in fix ticks) observed during playback.
+static void nd_pb_note_delta(int delta)
+{
+	int i, best = 0, best_count = 0;
+
+	// Only plausible intervals: >= ~1ms (65 ticks, i.e. 1000fps) so noise is
+	// excluded. Anything outside is ignored rather than stored.
+	if (delta < 65)
+		return;
+
+	nd_pb_ring[nd_pb_pos] = delta;
+	nd_pb_pos = (nd_pb_pos + 1) % ND_PB_WINDOW;
+	if (nd_pb_filled < ND_PB_WINDOW)
+		nd_pb_filled++;
+
+	// Median of the recent window. Recorded intervals are real elapsed times, so they differ
+	// by a few ticks and never repeat exactly; an exact-match mode never found a majority.
+	// The median ignores stray values and hitches and follows a real rate change.
+	if (nd_pb_filled >= 8)
+	{
+		int sorted[ND_PB_WINDOW], j;
+
+		for (i = 0; i < nd_pb_filled; i++)
+		{
+			for (j = i; j > 0 && sorted[j - 1] > nd_pb_ring[i]; j--)
+				sorted[j] = sorted[j - 1];
+			sorted[j] = nd_pb_ring[i];
+		}
+		best = sorted[nd_pb_filled / 2];
+		best_count = nd_pb_filled;
+	}
+
+	if (best && best_count)
+		Newdemo_recorded_fps = (int)(((fix64)F1_0) / best);
+}
+
+static void nd_pb_reset(void)
+{
+	nd_pb_pos = 0;
+	nd_pb_filled = 0;
+}
+
+// Exposed for the HUD to display alongside the live framerate.
+int Newdemo_recorded_fps = 0;
 
 //returns the number of demo files on the disk
 int newdemo_count_demos()
@@ -3519,6 +4000,12 @@ void newdemo_start_playback(char * filename)
 	char **find = NULL, **i;
 	int rnd_demo = 0;
 	char filename2[PATH_MAX+FILENAME_LEN] = DEMO_DIR;
+
+	// Seed the readout from an upfront scan (covers the first stretch before the
+	// rolling estimate has enough samples), and reset the rolling state so a
+	// replayed/looped demo does not inherit the previous one's intervals.
+	nd_pb_reset();
+	Newdemo_recorded_fps = filename ? newdemo_get_recorded_fps(filename) : 0;
 
 #ifdef NETWORK
 	change_playernum_to(0);
@@ -3582,7 +4069,7 @@ void newdemo_start_playback(char * filename)
 		return;
 	}
 
-	Game_mode = GM_NORMAL;
+	Game_mode = GM_NORMAL | (Game_mode & GM_OBSERVER);
 	Newdemo_state = ND_STATE_PLAYBACK;
 	Newdemo_vcr_state = ND_STATE_PLAYBACK;
 	nd_playback_v_demosize = PHYSFS_fileLength(infile);
@@ -3607,6 +4094,11 @@ void newdemo_stop_playback()
 {
 	PHYSFS_close(infile);
 	Newdemo_state = ND_STATE_NORMAL;
+	// Clear the recorded capture rate along with the playback state. Without this
+	// the last demo's rate stays cached, so the next demo played -- and any demo
+	// that fails the upfront scan and leaves the value unset -- shows a stale
+	// "DEMO: 167" line against the wrong recording.
+	Newdemo_recorded_fps = 0;
 #ifdef NETWORK
 	change_playernum_to(0);             //this is reality
 #endif

@@ -113,6 +113,15 @@ char dgss_id[4] = "DGSS";
 
 uint state_game_id;
 
+// Speedrun clocks in savegames. Version-tagged so trailing bytes are recognised
+// instead of blindly reinterpreted.
+//
+//   0 - no speedrun data at all (saves from before the feature).
+//   1 - legacy RTA only (restored as current IGT).
+//   2 - legacy RTA/IGT slots; their meanings are reversed from the current HUD
+//       labels, so the loader maps each slot to the matching current timer.
+#define SPEEDRUN_SAVE_VERSION 2
+
 // Following functions convert object to object_rw and back to be written to/read from Savegames. Mostly object differs to object_rw in terms of timer values (fix/fix64). as we reset GameTime64 for writing so it can fit into fix it's not necessary to increment savegame version. But if we once store something else into object which might be useful after restoring, it might be handy to increment Savegame version and actually store these new infos.
 // turn object to object_rw to be saved to Savegame.
 void state_object_to_object_rw(object *obj, object_rw *obj_rw)
@@ -193,6 +202,7 @@ void state_object_to_object_rw(object *obj, object_rw *obj_rw)
 			obj_rw->ctype.laser_info.last_hitobj      = obj->ctype.laser_info.last_hitobj;
 			obj_rw->ctype.laser_info.track_goal       = obj->ctype.laser_info.track_goal;
 			obj_rw->ctype.laser_info.multiplier       = obj->ctype.laser_info.multiplier;
+			obj->ctype.laser_info.creation_framecount = 0;
 			break;
 			
 		case CT_EXPLOSION:
@@ -349,7 +359,8 @@ void state_object_rw_to_object(object_rw *obj_rw, object *obj)
 			obj->ctype.laser_info.parent_signature = obj_rw->ctype.laser_info.parent_signature;
 			obj->ctype.laser_info.creation_time    = obj_rw->ctype.laser_info.creation_time;
 			obj->ctype.laser_info.last_hitobj      = obj_rw->ctype.laser_info.last_hitobj;
-			obj->ctype.laser_info.hitobj_list[obj->ctype.laser_info.last_hitobj] = 1; // restore most recent hitobj to hitobj_list
+			if (obj->ctype.laser_info.last_hitobj >= 0)
+				obj->ctype.laser_info.hitobj_list[obj->ctype.laser_info.last_hitobj] = 1; // restore most recent hitobj to hitobj_list
 			obj->ctype.laser_info.track_goal       = obj_rw->ctype.laser_info.track_goal;
 			obj->ctype.laser_info.multiplier       = obj_rw->ctype.laser_info.multiplier;
 			break;
@@ -967,8 +978,8 @@ int state_save_all_sub(char *filename, char *desc)
 	}
 
 // Save the current weapon info
-	PHYSFS_write(fp, &Primary_weapon, sizeof(sbyte), 1);
-	PHYSFS_write(fp, &Secondary_weapon, sizeof(sbyte), 1);
+	PHYSFS_write(fp, &Players[Player_num].primary_weapon, sizeof(sbyte), 1);
+	PHYSFS_write(fp, &Players[Player_num].secondary_weapon, sizeof(sbyte), 1);
 
 // Save the difficulty level
 	PHYSFS_write(fp, &Difficulty_level, sizeof(int), 1);
@@ -1083,7 +1094,7 @@ int state_save_all_sub(char *filename, char *desc)
 	PHYSFS_write(fp, &Players[0].callsign[0], sizeof(char), (NUM_MARKERS)*(CALLSIGN_LEN+1)); // PHYSFS_write(fp, MarkerOwner, sizeof(MarkerOwner), 1); MarkerOwner is obsolete
 	PHYSFS_write(fp, MarkerMessage, sizeof(MarkerMessage), 1);
 
-	PHYSFS_write(fp, &Afterburner_charge, sizeof(fix), 1);
+	PHYSFS_write(fp, &Players[Player_num].afterburner_charge, sizeof(fix), 1);
 
 	//save last was super information
 	PHYSFS_write(fp, &Primary_last_was_super, sizeof(Primary_last_was_super), 1);
@@ -1130,6 +1141,18 @@ int state_save_all_sub(char *filename, char *desc)
 		PHYSFS_write(fp, &Netgame.level_time, sizeof(int), 1);
 	}
 
+	// Append both speedrun clocks so every existing save field keeps its offset.
+	// Match D1's version-2 slot order for compatibility with the timer label swap.
+	{
+		PHYSFS_sint32 ver = SPEEDRUN_SAVE_VERSION;
+		PHYSFS_sint64 legacy_rta_slot_ms = (PHYSFS_sint64)Speedrun_igt;
+		PHYSFS_sint64 legacy_igt_slot_ms = (PHYSFS_sint64)Speedrun_rta;
+
+		PHYSFS_write(fp, &ver, sizeof(PHYSFS_sint32), 1);
+		PHYSFS_write(fp, &legacy_rta_slot_ms, sizeof(PHYSFS_sint64), 1);
+		PHYSFS_write(fp, &legacy_igt_slot_ms, sizeof(PHYSFS_sint64), 1);
+	}
+
 	PHYSFS_close(fp);
 	
 	start_time();
@@ -1161,7 +1184,7 @@ int state_restore_all(int in_game, int secret_restore, char *filename_override)
 	}
 
 	if ( Newdemo_state == ND_STATE_RECORDING )
-		newdemo_stop_recording();
+		newdemo_stop_recording(0);
 
 	if ( Newdemo_state != ND_STATE_NORMAL )
 		return 0;
@@ -1237,7 +1260,7 @@ int state_restore_all_sub(char *filename, int secret_restore)
 	PHYSFS_file *fp;
 	int swap = 0;	// if file is not endian native, have to swap all shorts and ints
 	int current_level;
-	char mission[16];
+	char mission[128];
 	char desc[DESC_LENGTH+1];
 	char id[5];
 	char org_callsign[CALLSIGN_LEN+16];
@@ -1303,6 +1326,17 @@ int state_restore_all_sub(char *filename, int secret_restore)
 
 // Read the mission info...
 	PHYSFS_read(fp, mission, sizeof(char) * 9, 1);
+
+	if (mission[8] == 1) { // rebirth savegame_mission_name_abi::pathname
+		char *p;
+		PHYSFS_read(fp, mission, 128, 1);
+		if (mission[127]) {
+			PHYSFS_close(fp);
+			return 0;
+		}
+		if ((p = strrchr(mission, '/')))
+			memmove(mission, p + 1, strlen(p + 1) + 1);
+	}
 
 	if (!load_mission_by_name( mission ))	{
 		nm_messagebox( NULL, 1, "Ok", "Error!\nUnable to load mission\n'%s'\n", mission );
@@ -1387,11 +1421,11 @@ int state_restore_all_sub(char *filename, int secret_restore)
 		Players[Player_num].objnum = coop_org_objnum;
 
 // Restore the weapon states
-	PHYSFS_read(fp, &Primary_weapon, sizeof(sbyte), 1);
-	PHYSFS_read(fp, &Secondary_weapon, sizeof(sbyte), 1);
+	PHYSFS_read(fp, &Players[Player_num].primary_weapon, sizeof(sbyte), 1);
+	PHYSFS_read(fp, &Players[Player_num].secondary_weapon, sizeof(sbyte), 1);
 
-	select_weapon(Primary_weapon, 0, 0, 0);
-	select_weapon(Secondary_weapon, 1, 0, 0);
+	select_weapon(Players[Player_num].primary_weapon, 0, 0, 0);
+	select_weapon(Players[Player_num].secondary_weapon, 1, 0, 0);
 
 // Restore the difficulty level
 	Difficulty_level = PHYSFSX_readSXE32(fp, swap);
@@ -1420,6 +1454,11 @@ int state_restore_all_sub(char *filename, int secret_restore)
 		state_object_rw_to_object(obj_rw, &Objects[i]);
 		d_free(obj_rw);
 	}
+
+	//Check for rebirth missing signatures
+	if (!Objects[0].signature && !Objects[1].signature)
+		for (i=0; i<=Highest_object_index; i++)
+			Objects[i].signature = i + 1;
 
 	for (i=0; i<=Highest_object_index; i++ )	{
 		obj = &Objects[i];
@@ -1456,6 +1495,11 @@ int state_restore_all_sub(char *filename, int secret_restore)
 	//Restore wall info
 	Num_walls = PHYSFSX_readSXE32(fp, swap);
 	wall_read_n_swap(Walls, Num_walls, swap, fp);
+
+	//Check for rebirth linked_wall value
+	for (i=0;i<Num_walls;i++)
+		if (Walls[i].linked_wall == 65535) // rebirth dcx::wallnum_t::None
+			Walls[i].linked_wall = -1;
 
 	//now that we have the walls, check if any sounds are linked to
 	//walls that are now open
@@ -1560,7 +1604,7 @@ int state_restore_all_sub(char *filename, int secret_restore)
 
 	if (version>=11) {
 		if (secret_restore != 1)
-			Afterburner_charge = PHYSFSX_readSXE32(fp, swap);
+			Players[Player_num].afterburner_charge = PHYSFSX_readSXE32(fp, swap);
 		else {
 			PHYSFSX_readSXE32(fp, swap);
 		}
@@ -1633,7 +1677,8 @@ int state_restore_all_sub(char *filename, int secret_restore)
 		object restore_objects[MAX_PLAYERS];
 		int coop_got_nplayers = 0;
 
-		for (i = 0; i < MAX_PLAYERS; i++) 
+		memset(restore_players, 0, sizeof(restore_players)); // fields the save doesn't hold start at 0, not stack garbage
+		for (i = 0; i < MAX_PLAYERS; i++)
 		{
 			player_rw *pl_rw;
 			object *obj;
@@ -1666,9 +1711,13 @@ int state_restore_all_sub(char *filename, int secret_restore)
 				{
 					object *obj;
 					int sav_objnum = Players[i].objnum;
-					
+					sbyte sav_primary = Players[i].primary_weapon, sav_secondary = Players[i].secondary_weapon;
+
 					memcpy(&Players[i], &restore_players[j], sizeof(player));
 					Players[i].objnum = sav_objnum;
+					// the selected weapons aren't in the stored player; keep the current ones
+					Players[i].primary_weapon = sav_primary;
+					Players[i].secondary_weapon = sav_secondary;
 					
 					coop_player_got[i] = 1;
 					coop_got_nplayers++;
@@ -1713,8 +1762,46 @@ int state_restore_all_sub(char *filename, int secret_restore)
 			if (!coop_player_got[i] && Players[i].connected == CONNECT_PLAYING)
 				multi_disconnect_player(i);
 		Viewer = ConsoleObject = &Objects[Players[Player_num].objnum]; // make sure Viewer and ConsoleObject are set up (which we skipped by not using InitPlayerObject but we need since objects changed while loading)
+		// multi_reset_player_object() above treated our own ship like a remote one and cleared its roll,
+		// auto-level and idle bounce; give them back, as InitPlayerObject would
+		if (!is_observer())
+			ConsoleObject->mtype.phys_info.flags |= PF_TURNROLL | PF_LEVELLING | PF_WIGGLE | PF_USES_THRUST;
 		special_reset_objects(); // since we juggeled around with objects to remap coop players rebuild the index of free objects
 	}
+
+	// Loading restores both clocks from the save and marks the run as continued
+	// so the HUD uses the white interrupted-run color.
+	speedrun_game_loaded();
+	{
+		PHYSFS_sint64 remaining = (PHYSFS_sint64)PHYSFS_fileLength(fp) - (PHYSFS_sint64)PHYSFS_tell(fp);
+
+		if (remaining >= (PHYSFS_sint64)(sizeof(PHYSFS_sint32) + sizeof(PHYSFS_sint64) * 2))
+		{
+			PHYSFS_sint32 ver = 0;
+			PHYSFS_sint64 legacy_rta_slot_ms = 0, legacy_igt_slot_ms = 0;
+
+			if (PHYSFS_read(fp, &ver, sizeof(PHYSFS_sint32), 1) == 1 &&
+				PHYSFS_read(fp, &legacy_rta_slot_ms, sizeof(PHYSFS_sint64), 1) == 1 &&
+				PHYSFS_read(fp, &legacy_igt_slot_ms, sizeof(PHYSFS_sint64), 1) == 1 &&
+				ver >= SPEEDRUN_SAVE_VERSION)
+			{
+				speedrun_igt_restored((fix64)legacy_rta_slot_ms);
+				speedrun_rta_restored((fix64)legacy_igt_slot_ms);
+			}
+		}
+		else if (remaining >= (PHYSFS_sint64)sizeof(PHYSFS_sint64))
+		{
+			// Legacy save with only one timer slot: restore the former RTA as IGT.
+			PHYSFS_sint64 legacy_rta_slot_ms = 0;
+
+			if (PHYSFS_read(fp, &legacy_rta_slot_ms, sizeof(PHYSFS_sint64), 1) == 1)
+				speedrun_igt_restored((fix64)legacy_rta_slot_ms);
+		}
+	}
+
+	if (PHYSFS_tell(fp) != PHYSFS_fileLength(fp))
+		con_printf(CON_URGENT, "savegame not completely read, might be corrupt! (cur %d, size %d)",
+			(int)PHYSFS_tell(fp), (int)PHYSFS_fileLength(fp));
 
 	PHYSFS_close(fp);
 

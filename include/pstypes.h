@@ -27,7 +27,7 @@ typedef unsigned int uint;
 #endif
 
 #if defined(_WIN32) || defined(__sun__) // platforms missing (u_)int??_t
-# include <SDL/SDL_types.h>
+# include <SDL_types.h>
 #elif defined(macintosh) // misses (u_)int??_t and does not like SDL_types.h
 # include <MacTypes.h>
  typedef SInt16 int16_t;
@@ -57,14 +57,13 @@ typedef unsigned int uint;
 #define PATH_MAX 4096
 #endif
 
-#ifdef __cplusplus
-#define bool psbool
- typedef ubyte bool;
-#endif
-
+#ifndef __cplusplus
+#if __STDC_VERSION__ < 202311L
 #ifndef bool
 //define a boolean
 typedef ubyte bool;
+#endif
+#endif
 #endif
 
 #ifndef NULL
@@ -75,7 +74,7 @@ typedef ubyte bool;
 // and since this file is included everywhere, it's here.
 #if  defined(__i386__) || defined(__ia64__) || defined(_WIN32) || \
 (defined(__alpha__) || defined(__alpha)) || \
-defined(__arm__) || defined(ARM) || \
+defined(__arm__) || defined(ARM) || defined(__aarch64__) || \
 (defined(__mips__) && defined(__MIPSEL__)) || \
 defined(__SYMBIAN32__) || \
 defined(__x86_64__) || \

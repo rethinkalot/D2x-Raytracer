@@ -101,6 +101,7 @@ typedef struct _grs_bitmap {
 #endif
 #ifdef OGL
 	struct _ogl_texture *gltexture;
+	struct _ogl_texture *gltexture_mask;
 #endif /* def OGL */
 } grs_bitmap;
 
@@ -152,6 +153,20 @@ typedef struct _grs_screen {    // This is a video screen
 // canvas.  Saves the current VGA state and screen mode.
 
 int gr_init(int mode);
+
+// Returns non-zero if the video backend can actually CONTROL vsync (turn it on
+// and off), as opposed to the driver merely offering it.
+//
+// The distinction matters because a "VSync" checkbox that cannot reach the
+// driver is worse than no checkbox at all: it looks like it works, but it
+// silently does something else. Drivers routinely apply vsync on their own with
+// no way for an application to query or change it, so an unconditional toggle is
+// inherently misleading.
+//
+// Callers use this to show the option only where it is meaningful. A backend
+// that cannot control vsync returns 0 and the option is hidden, leaving the
+// frame rate under the application's own control.
+int gr_vsync_supported(void);
 
 int gr_list_modes( u_int32_t gsmodes[] );
 int gr_check_mode(u_int32_t mode);
@@ -379,6 +394,10 @@ extern void gr_set_draw_buffer(int buf);
  * must return 0 if windowed, 1 if fullscreen
  */
 int gr_check_fullscreen(void);
+
+// Size of the monitor the game window is on; 0 if it can't be told (not Windows)
+int gr_monitor_size(int *w, int *h);
+void gr_window_to_game(int *x, int *y); // window pixels to game pixels (fullscreen borderless stretches the picture)
 
 /*
  * returns state after toggling (ie, same as if you had called

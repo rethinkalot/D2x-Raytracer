@@ -2047,7 +2047,7 @@ int do_any_robot_dying_frame(object *objp)
 			objp->ctype.ai_info.dying_start_time = GameTime64; // make sure following only happens one time!
 			explode_object(objp, F1_0/4);
 			digi_link_sound_to_object2(SOUND_BADASS_EXPLOSION, objp-Objects, 0, F2_0, F1_0*512);
-			if ((Current_level_num < 0) && (Robot_info[objp->id].thief))
+			if ((Current_level_num < 0) && (Robot_info[objp->id].thief) && !is_observer()) // an observer never makes its own Thief
 				recreate_thief(objp);
 		}
 
@@ -2257,7 +2257,7 @@ void ai_do_actual_firing_stuff(object *obj, ai_static *aip, ai_local *ailp, robo
 		if (((!object_animates) || (ailp->achieved_state[aip->CURRENT_GUN] == AIS_FIRE))
 			 && (((ailp->next_fire <= 0) && (aip->CURRENT_GUN != 0)) || ((ailp->next_fire2 <= 0) && (aip->CURRENT_GUN == 0)))
 			 && (vm_vec_dist_quick(&Hit_pos, &obj->pos) > F1_0*40)) {
-			if (!ai_multiplayer_awareness(obj, ROBOT_FIRE_AGITATION))
+			if (!ai_multiplayer_awareness(obj, ROBOT_FIRE_AGITATION) || IS_VEC_NULL(gun_point))
 				return;
 			ai_fire_laser_at_player(obj, gun_point, gun_num, &Believed_player_pos);
 

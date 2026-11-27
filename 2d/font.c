@@ -166,6 +166,7 @@ int get_centered_x(const char *s)
 			continue;//skip color codes.
 		}
 		get_char_width_f(s[0],s[1],&w2,&s2);
+		s2 = (int)s2;
 		w += s2;
 	}
 
@@ -683,7 +684,7 @@ void ogl_init_font(grs_font * font)
 		gr_init_sub_bitmap(&font->ft_bitmaps[i],&font->ft_parent_bitmap,curx,cury,w,h);
 		curx+=w+gap;
 	}
-	ogl_loadbmtexture_f(&font->ft_parent_bitmap, GameCfg.TexFilt);
+	ogl_loadbmtexture_f(&font->ft_parent_bitmap, GameCfg.TexFilt, NULL);
 }
 
 int ogl_internal_string(int x, int y, const char *s )
@@ -973,7 +974,7 @@ void gr_remap_color_fonts()
 void gr_remap_mono_fonts()
 {
 	int fontnum;
-	con_printf (CON_DEBUG, "gr_remap_mono_fonts ()\n");
+	/* con_printf (CON_DEBUG, "gr_remap_mono_fonts ()\n"); */ // D1s doesn't print this either
 	for (fontnum=0;fontnum<MAX_OPEN_FONTS;fontnum++) {
 		grs_font *font;
 		font = open_font[fontnum].ptr;

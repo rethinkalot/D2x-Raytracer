@@ -160,8 +160,6 @@ extern int N_weapon_types;
 extern void do_weapon_select(int weapon_num, int secondary_flag);
 extern void show_weapon_status(void);
 
-extern sbyte Primary_weapon, Secondary_weapon;
-
 extern const ubyte Primary_weapon_to_weapon_info[MAX_PRIMARY_WEAPONS];
 extern const ubyte Secondary_weapon_to_weapon_info[MAX_SECONDARY_WEAPONS];
 
@@ -180,6 +178,12 @@ extern ubyte Secondary_last_was_super[MAX_SECONDARY_WEAPONS];
 
 extern void auto_select_weapon(int weapon_type);        //parm is primary or secondary
 extern void select_weapon(int weapon_num, int secondary_flag, int print_message,int wait_for_rearm);
+
+// Laser key on lasers with Laser 5 or 6: step down one level. player_laser_fire_level() is the level you
+// fire (and the HUD shows); Players[].laser_level stays the level you own.
+extern int Laser_lowered_from;
+extern int player_laser_fire_level(void);
+extern int laser_level_shown(int pnum);
 
 extern const char *const Primary_weapon_names_short[];
 extern const char *const Secondary_weapon_names_short[];
@@ -201,7 +205,7 @@ extern const sbyte    Weapon_is_energy[MAX_WEAPON_TYPES];
 //      HAS_ENERGY_FLAG
 //      HAS_AMMO_FLAG
 //      HAS_SUPER_FLAG
-extern int player_has_weapon(int weapon_num, int secondary_flag);
+extern int player_has_weapon(ubyte pnum, int weapon_num, int secondary_flag);
 
 //called when one of these weapons is picked up
 //when you pick up a secondary, you always get the weapon & ammo for it
@@ -213,6 +217,9 @@ int pick_up_primary(int weapon_index);
 
 // Run a delayed autoselect, if one is waiting
 void delayed_autoselect();
+
+extern int PrimaryWeaponPickedUp;
+extern int SecondaryWeaponPickedUp;
 
 //called when ammo (for the vulcan cannon) is picked up
 int pick_up_ammo(int class_flag,int weapon_index,int ammo_count);
@@ -227,6 +234,8 @@ extern int spit_powerup(struct object *spitter, int id, int seed);
 extern void rock_the_mine_frame(void);
 extern void smega_rock_stuff(void);
 extern void init_smega_detonates(void);
+
+extern void reset_auto_select();
 
 /*
  * reads n weapon_info structs from a PHYSFS_file

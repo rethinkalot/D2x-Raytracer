@@ -51,6 +51,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "vers_id.h"
 #include "newdemo.h"
 #include "gauges.h"
+#include "kconfig.h"
 
 //version 5  ->  6: added new highest level information
 //version 6  ->  7: stripped out the old saved_game array.
@@ -71,20 +72,44 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 //version 21 -> 22: save lifetime netstats 
 //version 22 -> 23: ??
 //version 23 -> 24: add name of joystick for windows version.
+//version 24 -> 25: use spare control settings for observer bindings.
+//version 25 -> 26: save two observer bindings per action and device.
 
 #define SAVE_FILE_ID MAKE_SIG('D','P','L','R')
-#define PLAYER_FILE_VERSION 24 //increment this every time the player file changes
+#define PLAYER_FILE_VERSION 26 //increment this every time the player file changes
 #define COMPATIBLE_PLAYER_FILE_VERSION 17
 
 struct player_config PlayerCfg;
 int get_lifetime_checksum (int a,int b);
 extern void InitWeaponOrdering();
+void read_observer_setting(int obs_mode, char *line, char *word);
+
+static void clear_observer_control_settings(void)
+{
+	int device, binding;
+
+	for (device = 0; device < NUM_OBSERVER_BINDING_TYPES; device++)
+		for (binding = 0; binding < NUM_OBSERVER_BINDING_SLOTS; binding++)
+			PlayerCfg.ObserverControlSettings[device][binding] = 255;
+}
+
+static void migrate_observer_control_settings(void)
+{
+	int device, action;
+
+	clear_observer_control_settings();
+	for (device = 0; device < NUM_OBSERVER_BINDING_TYPES; device++)
+		for (action = 0; action < NUM_OBSERVER_CONTROLS; action++)
+			PlayerCfg.ObserverControlSettings[device][action * NUM_OBSERVER_BINDINGS_PER_ACTION] =
+				PlayerCfg.KeySettings[device][OBSERVER_CONTROL_SETTINGS_START + action];
+}
 
 int new_player_config()
 {
 	InitWeaponOrdering (); //setup default weapon priorities
 	PlayerCfg.ControlType=0; // Assume keyboard
 	memcpy(PlayerCfg.KeySettings, DefaultKeySettings, sizeof(DefaultKeySettings));
+	clear_observer_control_settings();
 	memcpy(PlayerCfg.KeySettingsD2X, DefaultKeySettingsD2X, sizeof(DefaultKeySettingsD2X));
 	kc_set_controls();
 
@@ -97,14 +122,14 @@ int new_player_config()
 	PlayerCfg.JoystickSens[0] = PlayerCfg.JoystickSens[1] = PlayerCfg.JoystickSens[2] = PlayerCfg.JoystickSens[3] = PlayerCfg.JoystickSens[4] = PlayerCfg.JoystickSens[5] = 8;
 	PlayerCfg.JoystickDead[0] = PlayerCfg.JoystickDead[1] = PlayerCfg.JoystickDead[2] = PlayerCfg.JoystickDead[3] = PlayerCfg.JoystickDead[4] = PlayerCfg.JoystickDead[5] = 0;
 	PlayerCfg.JoystickUndercalibrate[0] = PlayerCfg.JoystickUndercalibrate[1] = PlayerCfg.JoystickUndercalibrate[2] = PlayerCfg.JoystickUndercalibrate[3] = PlayerCfg.JoystickUndercalibrate[4] = PlayerCfg.JoystickUndercalibrate[5] = 0;
-	PlayerCfg.MouseControlStyle = MOUSE_CONTROL_OLDSCHOOL; /* Old School Mouse */
+	PlayerCfg.MouseControlStyle = MOUSE_CONTROL_REBIRTH; /* Old School Mouse */
 	PlayerCfg.MouseImpulse = 8;
 	PlayerCfg.MouseSens[0] = PlayerCfg.MouseSens[1] = PlayerCfg.MouseSens[2] = PlayerCfg.MouseSens[3] = PlayerCfg.MouseSens[4] = PlayerCfg.MouseSens[5] = 8;
     PlayerCfg.MouseOverrun[0] = PlayerCfg.MouseOverrun[1] = PlayerCfg.MouseOverrun[2] = PlayerCfg.MouseOverrun[3] = PlayerCfg.MouseOverrun[4] = PlayerCfg.MouseOverrun[5] = 0;
 	PlayerCfg.MouseTurnLimit[0] = PlayerCfg.MouseTurnLimit[1] = PlayerCfg.JoystickTurnLimit[0] = PlayerCfg.JoystickTurnLimit[1] = 0;
 	PlayerCfg.MouseFSDead = 0;
 	PlayerCfg.MouseFSIndicator = 1;
-	PlayerCfg.CockpitMode[0] = PlayerCfg.CockpitMode[1] = CM_FULL_COCKPIT;
+	PlayerCfg.CurrentCockpitMode = PlayerCfg.PreferredCockpitMode = CM_FULL_COCKPIT;
 	PlayerCfg.Cockpit3DView[0]=CV_NONE;
 	PlayerCfg.Cockpit3DView[1]=CV_NONE;
 	PlayerCfg.ReticleType = RET_TYPE_CLASSIC;
@@ -119,26 +144,69 @@ int new_player_config()
 	PlayerCfg.EscortHotKeys = 1;
 	PlayerCfg.PersistentDebris = 0;
 	PlayerCfg.PRShot = 0;
+	PlayerCfg.DemoRecordingIndicator = 0;
 	PlayerCfg.NoRedundancy = 0;
 	PlayerCfg.MultiMessages = 0;
 	PlayerCfg.NoRankings = 0;
+	PlayerCfg.BombGauge = 1;
 	PlayerCfg.AutomapFreeFlight = 0;
 	PlayerCfg.AutomapXL = 0;
-	PlayerCfg.NoFireAutoselect = 0;
+	PlayerCfg.NoFireAutoselect = 1; /* SelectAfterFire */
 	PlayerCfg.CycleAutoselectOnly = 0;
 	PlayerCfg.AlphaEffects = 0;
 	PlayerCfg.DynLightColor = 0;
 	PlayerCfg.DisableCockpit = 0;  /* DisableCockpit */ 
-	PlayerCfg.StickyRearview = 0; /* StickyRearview */ 
+	PlayerCfg.StickyRearview = 0; /* StickyRearview */
+	PlayerCfg.LastInputWins = 0;
 	PlayerCfg.SelectAfterFire = 1;  /* SelectAfterFire */
+	PlayerCfg.AutoselectOnlyOnce = 0;
 	PlayerCfg.VulcanAmmoWarnings = 1; 
 	PlayerCfg.ShieldWarnings = 0; 
+	PlayerCfg.AutoDemoSp = 0;
+	PlayerCfg.AutoDemoMp = 0;
+	PlayerCfg.AutoDemoHideUi = 0;
+	PlayerCfg.ShowCustomColors = 1;
+	PlayerCfg.ShowSpeedrunTimers = 1;
+	PlayerCfg.ShowVelocityMeter = 1;
+	PlayerCfg.PreferMyTeamColors = 0;
 	PlayerCfg.ShieldEffects = 1;
 	PlayerCfg.UncappedTurning = 0;
 	PlayerCfg.QuietPlasma = 1; 
 	PlayerCfg.maxFps = GameArg.SysMaxFPS; 
 	PlayerCfg.ShipColor = 8;
-	PlayerCfg.MissileColor = 8;	
+	PlayerCfg.MissileColor = 8;
+	PlayerCfg.MyTeamColor = 8;
+	PlayerCfg.OtherTeamColor = 8;
+	PlayerCfg.ObsShareSettings = 1;
+	for (int obs_mode = 0; obs_mode < NUM_OBS_MODES; obs_mode++) {
+		PlayerCfg.ObsTurbo[obs_mode] = 0;
+		PlayerCfg.ObsShowCockpit[obs_mode] = 1;
+		PlayerCfg.ObsShowScoreboardShieldText[obs_mode] = 1;
+		PlayerCfg.ObsShowScoreboardShieldBar[obs_mode] = 1;
+		PlayerCfg.ObsShowAmmoBars[obs_mode] = 1;
+		PlayerCfg.ObsShowPrimary[obs_mode] = 1;
+		PlayerCfg.ObsShowSecondary[obs_mode] = 1;
+		PlayerCfg.ObsShowNames[obs_mode] = 0;
+		PlayerCfg.ObsShowDamage[obs_mode] = 1;
+		PlayerCfg.ObsShowShieldText[obs_mode] = 0;
+		PlayerCfg.ObsShowShieldBar[obs_mode] = 1;
+		PlayerCfg.ObsShowKillFeed[obs_mode] = 1;
+		PlayerCfg.ObsShowDeathSummary[obs_mode] = 0;
+		PlayerCfg.ObsShowStreaks[obs_mode] = 0;
+		PlayerCfg.ObsShowKillGraph[obs_mode] = 0;
+		PlayerCfg.ObsShowBreakdown[obs_mode] = 0;
+		PlayerCfg.ObsShowObs[obs_mode] = 1;
+		PlayerCfg.ObsChat[obs_mode] = 1;
+		PlayerCfg.ObsPlayerChat[obs_mode] = 1;
+		PlayerCfg.ObsShowBombTimes[obs_mode] = 0;
+		PlayerCfg.ObsTransparentThirdPerson[obs_mode] = 0;
+		PlayerCfg.ObsIncreaseThirdPersonDist[obs_mode] = 0;
+		PlayerCfg.ObsHideEnergyWeaponMuzzle[obs_mode] = 0;
+	}
+	PlayerCfg.NoChatSound = 0;
+	PlayerCfg.ShowObsMessages = 1;
+	PlayerCfg.ClassicAutoselectWeapon = 0;
+	PlayerCfg.OriginalD1Weapons = 0;
 
 	// Default taunt macros
 	#ifdef NETWORK
@@ -358,12 +426,16 @@ int read_player_d2x(char *filename)
 					PlayerCfg.PersistentDebris = atoi(line);
 				if(!strcmp(word,"PRSHOT"))
 					PlayerCfg.PRShot = atoi(line);
+				if (!strcmp(word, "DEMORECORDINGINDICATOR"))
+					PlayerCfg.DemoRecordingIndicator = atoi(line);
 				if(!strcmp(word,"NOREDUNDANCY"))
 					PlayerCfg.NoRedundancy = atoi(line);
 				if(!strcmp(word,"MULTIMESSAGES"))
 					PlayerCfg.MultiMessages = atoi(line);
 				if(!strcmp(word,"NORANKINGS"))
 					PlayerCfg.NoRankings = atoi(line);
+				if(!strcmp(word,"BOMBGAUGE"))
+					PlayerCfg.BombGauge = atoi(line);
 				if(!strcmp(word,"AUTOMAPFREEFLIGHT"))
 					PlayerCfg.AutomapFreeFlight = atoi(line);
 				if(!strcmp(word,"AUTOMAPFXL"))
@@ -371,17 +443,37 @@ int read_player_d2x(char *filename)
 				if(!strcmp(word,"DISABLECOCKPIT"))
 					PlayerCfg.DisableCockpit = atoi(line); /* DisableCockpit */ 
 				if(!strcmp(word,"STICKYREARVIEW"))
-					PlayerCfg.StickyRearview = atoi(line); /* StickyRearview */ 
+					PlayerCfg.StickyRearview = atoi(line); /* StickyRearview */
+				if(!strcmp(word,"LASTINPUTWINS"))
+					PlayerCfg.LastInputWins = atoi(line);
 				if(!strcmp(word,"SELECTAFTERFIRE"))
 					PlayerCfg.SelectAfterFire = atoi(line); /* SelectAfterFire */ 					
 				if(!strcmp(word,"NOFIREAUTOSELECT"))
 					PlayerCfg.NoFireAutoselect = atoi(line);
 				if(!strcmp(word,"CYCLEAUTOSELECTONLY"))
 					PlayerCfg.CycleAutoselectOnly = atoi(line);
+				if(!strcmp(word,"AUTOSELECTONLYFIRSTWEAPONPICKUP"))
+					PlayerCfg.AutoselectOnlyOnce = atoi(line);
+				if(!strcmp(word,"AUTOSELECTONLYONCE"))
+					PlayerCfg.AutoselectOnlyOnce = atoi(line);
 				if(!strcmp(word,"VULCANAMMOWARNINGS"))
 					PlayerCfg.VulcanAmmoWarnings = atoi(line);	
 				if(!strcmp(word,"SHIELDWARNINGS"))
 					PlayerCfg.ShieldWarnings = atoi(line);	
+				if(!strcmp(word,"AUTODEMO"))
+					PlayerCfg.AutoDemoMp = atoi(line);
+				if(!strcmp(word,"AUTODEMOSP"))
+					PlayerCfg.AutoDemoSp = atoi(line);
+				if(!strcmp(word,"AUTODEMOMP"))
+					PlayerCfg.AutoDemoMp = atoi(line);
+				if(!strcmp(word,"AUTODEMOHIDEUI"))
+					PlayerCfg.AutoDemoHideUi = atoi(line);
+				if(!strcmp(word,"SHOWCUSTOMCOLORS"))
+					PlayerCfg.ShowCustomColors = atoi(line);
+				if(!strcmp(word,"SHOWSPEEDRUNTIMERS"))
+					PlayerCfg.ShowSpeedrunTimers = atoi(line);
+				if(!strcmp(word,"SHOWVELOCITYMETER"))
+					PlayerCfg.ShowVelocityMeter = atoi(line);
 				if(!strcmp(word,"SHIELDEFFECTS"))
 					PlayerCfg.ShieldEffects = atoi(line);
 				if(!strcmp(word,"UNCAPPEDTURNING"))
@@ -395,20 +487,81 @@ int read_player_d2x(char *filename)
 				if(!strcmp(word,"JOYTURNLIMITY"))
 					PlayerCfg.JoystickTurnLimit[1] = atoi(line);
 				if(!strcmp(word,"SHIPCOLOR"))
-					PlayerCfg.ShipColor = atoi(line);	
+					PlayerCfg.ShipColor = atoi(line);
 				if(!strcmp(word,"MISSILECOLOR"))
-					PlayerCfg.MissileColor = atoi(line);																
-
+					PlayerCfg.MissileColor = atoi(line);
+				if (!strcmp(word, "OVERRIDETEAMCOLORS"))
+					PlayerCfg.PreferMyTeamColors = atoi(line);
+				if (!strcmp(word, "MYTEAMCOLOR"))
+					PlayerCfg.MyTeamColor = atoi(line);
+				if (!strcmp(word, "OTHERTEAMCOLOR"))
+					PlayerCfg.OtherTeamColor = atoi(line);
 				//if(!strcmp(word,"QUIETPLASMA"))
-				//	PlayerCfg.QuietPlasma = atoi(line);							
+				//	PlayerCfg.QuietPlasma = atoi(line);
 				if(!strcmp(word,"MAXFPS")) {
-					PlayerCfg.maxFps = atoi(line);	
-					if(PlayerCfg.maxFps < 25) { PlayerCfg.maxFps = 25; }
-					if(PlayerCfg.maxFps > 999) { PlayerCfg.maxFps = 999; }
+					PlayerCfg.maxFps = atoi(line);
+					if(PlayerCfg.maxFps < MIN_FRAMERATE_CAP) { PlayerCfg.maxFps = MIN_FRAMERATE_CAP; }
+					if(PlayerCfg.maxFps > MAXIMUM_FPS) { PlayerCfg.maxFps = MAXIMUM_FPS; }
 				}
+				if(!strcmp(word,"NOCHATSOUND"))
+					PlayerCfg.NoChatSound = atoi(line);
+				if(!strcmp(word,"SHOWOBSMESSAGES"))
+					PlayerCfg.ShowObsMessages = atoi(line);
+				if(!strcmp(word,"CLASSICAUTOSELECTWEAPON"))
+					PlayerCfg.ClassicAutoselectWeapon = atoi(line);
+				if(!strcmp(word,"ORIGINALD1WEAPONS"))
+					PlayerCfg.OriginalD1Weapons = atoi(line);
+
+				// Observer settings - migrate from old version
+				// If migrating from an older version, set all observer modes to the same value
+				read_observer_setting(-1, line, word);
+
 				d_free(word);
 				PHYSFSX_fgets(line,50,f);
 				word=splitword(line,'=');
+				d_strupr(word);
+			}
+		}
+		else if (strstr(word, "OBSERVER"))
+		{
+			d_free(word);
+			PHYSFSX_fgets(line, 50, f);
+			word = splitword(line, '=');
+			d_strupr(word);
+
+			while (!strstr(word, "END") && !PHYSFS_eof(f))
+			{
+				if (!strcmp(word, "OBSSHARESETTINGS"))
+					PlayerCfg.ObsShareSettings = atoi(line);
+				else if (PlayerCfg.ObsShareSettings)
+					read_observer_setting(-1, line, word);
+				else
+					for (int obs_mode = 0; obs_mode < NUM_OBS_MODES; obs_mode++) {
+						// Make an upper-case copy of the mode name
+						char mode_name_upper[50];
+						strcpy(mode_name_upper, Obs_mode_names[obs_mode]);
+						d_strupr(mode_name_upper);
+
+						if (strstr(word, mode_name_upper)) {
+							d_free(word);
+							PHYSFSX_fgets(line, 50, f);
+							word = splitword(line, '=');
+							d_strupr(word);
+
+							while (!strstr(word, "END") && !PHYSFS_eof(f)) {
+								read_observer_setting(obs_mode, line, word);
+
+								d_free(word);
+								PHYSFSX_fgets(line, 50, f);
+								word = splitword(line, '=');
+								d_strupr(word);
+							}
+						}
+					}
+
+				d_free(word);
+				PHYSFSX_fgets(line, 50, f);
+				word = splitword(line, '=');
 				d_strupr(word);
 			}
 		}
@@ -477,6 +630,43 @@ int read_player_d2x(char *filename)
 	PHYSFS_close(f);
 
 	return rc;
+}
+
+#define READ_OBS_SETTING(setting_name, setting) \
+	if (!strcmp(word, setting_name)) { \
+		if (obs_mode != -1) \
+			PlayerCfg.setting[obs_mode] = atoi(line); \
+		else \
+			for (int i = 0; i < NUM_OBS_MODES; i++) \
+				PlayerCfg.setting[i] = atoi(line); \
+		return; \
+	}
+
+void read_observer_setting(int obs_mode, char* line, char* word)
+{
+	READ_OBS_SETTING("OBSTURBO", ObsTurbo);
+	READ_OBS_SETTING("OBSSHOWCOCKPIT", ObsShowCockpit);
+	READ_OBS_SETTING("OBSSHOWSCOREBOARDSHIELDTEXT", ObsShowScoreboardShieldText);
+	READ_OBS_SETTING("OBSSHOWSCOREBOARDSHIELDBAR", ObsShowScoreboardShieldBar);
+	READ_OBS_SETTING("OBSSHOWAMMOBARS", ObsShowAmmoBars);
+	READ_OBS_SETTING("OBSSHOWPRIMARY", ObsShowPrimary);
+	READ_OBS_SETTING("OBSSHOWSECONDARY", ObsShowSecondary);
+	READ_OBS_SETTING("OBSSHOWNAMES", ObsShowNames);
+	READ_OBS_SETTING("OBSSHOWDAMAGE", ObsShowDamage);
+	READ_OBS_SETTING("OBSSHOWSHIELDTEXT", ObsShowShieldText);
+	READ_OBS_SETTING("OBSSHOWSHIELDBAR", ObsShowShieldBar);
+	READ_OBS_SETTING("OBSSHOWKILLFEED", ObsShowKillFeed);
+	READ_OBS_SETTING("OBSSHOWDEATHSUMMARY", ObsShowDeathSummary);
+	READ_OBS_SETTING("OBSSHOWSTREAKS", ObsShowStreaks);
+	READ_OBS_SETTING("OBSSHOWKILLGRAPH", ObsShowKillGraph);
+	READ_OBS_SETTING("OBSSHOWBREAKDOWN", ObsShowBreakdown);
+	READ_OBS_SETTING("OBSSHOWOBS", ObsShowObs);
+	READ_OBS_SETTING("OBSCHAT", ObsChat);
+	READ_OBS_SETTING("OBSPLAYERCHAT", ObsPlayerChat);
+	READ_OBS_SETTING("OBSSHOWBOMBTIMES", ObsShowBombTimes);
+	READ_OBS_SETTING("OBSTRANSPARENTTHIRDPERSON", ObsTransparentThirdPerson);
+	READ_OBS_SETTING("OBSINCREASETHIRDPERSONDIST", ObsIncreaseThirdPersonDist);
+	READ_OBS_SETTING("OBSHIDEENERGYWEAPONMUZZLE", ObsHideEnergyWeaponMuzzle);
 }
 
 int write_player_d2x(char *filename)
@@ -566,18 +756,28 @@ int write_player_d2x(char *filename)
 		PHYSFSX_printf(fout,"escorthotkeys=%i\n",PlayerCfg.EscortHotKeys);
 		PHYSFSX_printf(fout,"persistentdebris=%i\n",PlayerCfg.PersistentDebris);
 		PHYSFSX_printf(fout,"prshot=%i\n",PlayerCfg.PRShot);
+		PHYSFSX_printf(fout,"demorecordingindicator=%i\n",PlayerCfg.DemoRecordingIndicator);
 		PHYSFSX_printf(fout,"noredundancy=%i\n",PlayerCfg.NoRedundancy);
 		PHYSFSX_printf(fout,"multimessages=%i\n",PlayerCfg.MultiMessages);
 		PHYSFSX_printf(fout,"norankings=%i\n",PlayerCfg.NoRankings);
+		PHYSFSX_printf(fout,"bombgauge=%i\n",PlayerCfg.BombGauge);
 		PHYSFSX_printf(fout,"automapfreeflight=%i\n",PlayerCfg.AutomapFreeFlight);
 		PHYSFSX_printf(fout,"automapxl=%i\n",PlayerCfg.AutomapXL);
 		PHYSFSX_printf(fout,"disablecockpit=%i\n",PlayerCfg.DisableCockpit); /* DisableCockpit */ 
-		PHYSFSX_printf(fout,"stickyrearview=%i\n",PlayerCfg.StickyRearview); /* StickyRearview */ 
+		PHYSFSX_printf(fout,"stickyrearview=%i\n",PlayerCfg.StickyRearview); /* StickyRearview */
+		PHYSFSX_printf(fout,"lastinputwins=%i\n",PlayerCfg.LastInputWins);
 		PHYSFSX_printf(fout,"selectafterfire=%i\n",PlayerCfg.SelectAfterFire); /* SelectAfterFire */ 		
 		PHYSFSX_printf(fout,"nofireautoselect=%i\n",PlayerCfg.NoFireAutoselect);
 		PHYSFSX_printf(fout,"cycleautoselectonly=%i\n",PlayerCfg.CycleAutoselectOnly);
+		PHYSFSX_printf(fout,"autoselectonlyfirstweaponpickup=%i\n",PlayerCfg.AutoselectOnlyOnce);
 		PHYSFSX_printf(fout,"vulcanammowarnings=%i\n",PlayerCfg.VulcanAmmoWarnings);		
-		PHYSFSX_printf(fout,"shieldwarnings=%i\n",PlayerCfg.ShieldWarnings);			
+		PHYSFSX_printf(fout,"shieldwarnings=%i\n",PlayerCfg.ShieldWarnings);
+		PHYSFSX_printf(fout,"autodemosp=%i\n",PlayerCfg.AutoDemoSp);
+		PHYSFSX_printf(fout,"autodemomp=%i\n",PlayerCfg.AutoDemoMp);
+		PHYSFSX_printf(fout,"autodemohideui=%i\n",PlayerCfg.AutoDemoHideUi);
+		PHYSFSX_printf(fout,"showcustomcolors=%i\n",PlayerCfg.ShowCustomColors);
+		PHYSFSX_printf(fout,"showspeedruntimers=%i\n",PlayerCfg.ShowSpeedrunTimers);
+		PHYSFSX_printf(fout,"showvelocitymeter=%i\n",PlayerCfg.ShowVelocityMeter);
 		PHYSFSX_printf(fout,"shieldeffects=%i\n",PlayerCfg.ShieldEffects);
 		PHYSFSX_printf(fout,"uncappedturning=%i\n",PlayerCfg.UncappedTurning);
 		PHYSFSX_printf(fout,"mouseturnlimitx=%d\n",PlayerCfg.MouseTurnLimit[0]);
@@ -586,9 +786,79 @@ int write_player_d2x(char *filename)
 		PHYSFSX_printf(fout,"joyturnlimity=%d\n",PlayerCfg.JoystickTurnLimit[1]);
 		PHYSFSX_printf(fout,"shipcolor=%i\n",PlayerCfg.ShipColor);	
 		PHYSFSX_printf(fout,"missilecolor=%i\n",PlayerCfg.MissileColor);
+		PHYSFSX_printf(fout, "overrideteamcolors=%i\n", PlayerCfg.PreferMyTeamColors);
+		PHYSFSX_printf(fout, "myteamcolor=%i\n", PlayerCfg.MyTeamColor);
+		PHYSFSX_printf(fout, "otherteamcolor=%i\n", PlayerCfg.OtherTeamColor);
 		//PHYSFSX_printf(fout,"quietplasma=%i\n",PlayerCfg.QuietPlasma);	
 		PHYSFSX_printf(fout,"maxfps=%i\n",PlayerCfg.maxFps);	
+		PHYSFSX_printf(fout,"nochatsound=%i\n",PlayerCfg.NoChatSound);
+		PHYSFSX_printf(fout,"showobsmessages=%i\n",PlayerCfg.ShowObsMessages);
+		PHYSFSX_printf(fout,"classicautoselectweapon=%i\n",PlayerCfg.ClassicAutoselectWeapon);
+		PHYSFSX_printf(fout,"originald1weapons=%i\n",PlayerCfg.OriginalD1Weapons);
 		PHYSFSX_printf(fout,"[end]\n");
+		PHYSFSX_printf(fout, "[observer]\n");
+		PHYSFSX_printf(fout, "obssharesettings=%i\n", PlayerCfg.ObsShareSettings);
+		if (PlayerCfg.ObsShareSettings) {
+			// Write one set of observer settings for all game modes
+			PHYSFSX_printf(fout, "obsturbo=%i\n", PlayerCfg.ObsTurbo[0]);
+			PHYSFSX_printf(fout, "obsshowcockpit=%i\n", PlayerCfg.ObsShowCockpit[0]);
+			PHYSFSX_printf(fout, "obsshowscoreboardshieldtext=%i\n", PlayerCfg.ObsShowScoreboardShieldText[0]);
+			PHYSFSX_printf(fout, "obsshowscoreboardshieldbar=%i\n", PlayerCfg.ObsShowScoreboardShieldBar[0]);
+			PHYSFSX_printf(fout, "obsshowammobars=%i\n", PlayerCfg.ObsShowAmmoBars[0]);
+			PHYSFSX_printf(fout, "obsshowprimary=%i\n", PlayerCfg.ObsShowPrimary[0]);
+			PHYSFSX_printf(fout, "obsshowsecondary=%i\n", PlayerCfg.ObsShowSecondary[0]);
+			PHYSFSX_printf(fout, "obsshownames=%i\n", PlayerCfg.ObsShowNames[0]);
+			PHYSFSX_printf(fout, "obsshowdamage=%i\n", PlayerCfg.ObsShowDamage[0]);
+			PHYSFSX_printf(fout, "obsshowshieldtext=%i\n", PlayerCfg.ObsShowShieldText[0]);
+			PHYSFSX_printf(fout, "obsshowshieldbar=%i\n", PlayerCfg.ObsShowShieldBar[0]);
+			PHYSFSX_printf(fout, "obsshowkillfeed=%i\n", PlayerCfg.ObsShowKillFeed[0]);
+			PHYSFSX_printf(fout, "obsshowdeathsummary=%i\n", PlayerCfg.ObsShowDeathSummary[0]);
+			PHYSFSX_printf(fout, "obsshowstreaks=%i\n", PlayerCfg.ObsShowStreaks[0]);
+			PHYSFSX_printf(fout, "obsshowkillgraph=%i\n", PlayerCfg.ObsShowKillGraph[0]);
+			PHYSFSX_printf(fout, "obsshowbreakdown=%i\n", PlayerCfg.ObsShowBreakdown[0]);
+			PHYSFSX_printf(fout, "obsshowobs=%i\n", PlayerCfg.ObsShowObs[0]);
+			PHYSFSX_printf(fout, "obschat=%i\n", PlayerCfg.ObsChat[0]);
+			PHYSFSX_printf(fout, "obsplayerchat=%i\n", PlayerCfg.ObsPlayerChat[0]);
+			PHYSFSX_printf(fout, "obsshowbombtimes=%i\n", PlayerCfg.ObsShowBombTimes[0]);
+			PHYSFSX_printf(fout, "obstransparentthirdperson=%i\n", PlayerCfg.ObsTransparentThirdPerson[0]);
+			PHYSFSX_printf(fout, "obsincreasethirdpersondist=%i\n", PlayerCfg.ObsIncreaseThirdPersonDist[0]);
+			PHYSFSX_printf(fout, "obshideenergyweaponmuzzle=%i\n", PlayerCfg.ObsHideEnergyWeaponMuzzle[0]);
+		} else {
+			// Write separate observer settings for each game mode
+			for (int obs_mode = 0; obs_mode < NUM_OBS_MODES; obs_mode++) {
+				// Make a lower-case copy of the mode name
+				char mode_name_lower[20];
+				strcpy(mode_name_lower, Obs_mode_names[obs_mode]);
+				d_strlwr(mode_name_lower);
+
+				PHYSFSX_printf(fout, "[%s]\n", mode_name_lower);
+				PHYSFSX_printf(fout, "obsturbo=%i\n", PlayerCfg.ObsTurbo[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowcockpit=%i\n", PlayerCfg.ObsShowCockpit[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowscoreboardshieldtext=%i\n", PlayerCfg.ObsShowScoreboardShieldText[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowscoreboardshieldbar=%i\n", PlayerCfg.ObsShowScoreboardShieldBar[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowammobars=%i\n", PlayerCfg.ObsShowAmmoBars[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowprimary=%i\n", PlayerCfg.ObsShowPrimary[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowsecondary=%i\n", PlayerCfg.ObsShowSecondary[obs_mode]);
+				PHYSFSX_printf(fout, "obsshownames=%i\n", PlayerCfg.ObsShowNames[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowdamage=%i\n", PlayerCfg.ObsShowDamage[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowshieldtext=%i\n", PlayerCfg.ObsShowShieldText[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowshieldbar=%i\n", PlayerCfg.ObsShowShieldBar[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowkillfeed=%i\n", PlayerCfg.ObsShowKillFeed[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowdeathsummary=%i\n", PlayerCfg.ObsShowDeathSummary[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowstreaks=%i\n", PlayerCfg.ObsShowStreaks[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowkillgraph=%i\n", PlayerCfg.ObsShowKillGraph[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowbreakdown=%i\n", PlayerCfg.ObsShowBreakdown[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowobs=%i\n", PlayerCfg.ObsShowObs[obs_mode]);
+				PHYSFSX_printf(fout, "obschat=%i\n", PlayerCfg.ObsChat[obs_mode]);
+				PHYSFSX_printf(fout, "obsplayerchat=%i\n", PlayerCfg.ObsPlayerChat[obs_mode]);
+				PHYSFSX_printf(fout, "obsshowbombtimes=%i\n", PlayerCfg.ObsShowBombTimes[obs_mode]);
+				PHYSFSX_printf(fout, "obstransparentthirdperson=%i\n", PlayerCfg.ObsTransparentThirdPerson[obs_mode]);
+				PHYSFSX_printf(fout, "obsincreasethirdpersondist=%i\n", PlayerCfg.ObsIncreaseThirdPersonDist[obs_mode]);
+				PHYSFSX_printf(fout, "obshideenergyweaponmuzzle=%i\n", PlayerCfg.ObsHideEnergyWeaponMuzzle[obs_mode]);
+				PHYSFSX_printf(fout, "[end]\n");
+			}
+		}
+		PHYSFSX_printf(fout, "[end]\n");
 		PHYSFSX_printf(fout,"[graphics]\n");
 		PHYSFSX_printf(fout,"alphaeffects=%i\n",PlayerCfg.AlphaEffects);
 		PHYSFSX_printf(fout,"dynlightcolor=%i\n",PlayerCfg.DynLightColor);
@@ -663,7 +933,7 @@ int read_player_file()
 	PlayerCfg.DefaultDifficulty = PHYSFSX_readByte(file);
 	PlayerCfg.AutoLeveling       = PHYSFSX_readByte(file);
 	PHYSFS_seek(file,PHYSFS_tell(file)+sizeof(sbyte)); // skip ReticleOn
-	PlayerCfg.CockpitMode[0] = PlayerCfg.CockpitMode[1] = PHYSFSX_readByte(file);
+	PlayerCfg.CurrentCockpitMode = PlayerCfg.PreferredCockpitMode = PHYSFSX_readByte(file);
 	PHYSFS_seek(file,PHYSFS_tell(file)+sizeof(sbyte)); //skip Default_display_mode
 	PlayerCfg.MissileViewEnabled      = PHYSFSX_readByte(file);
 	PlayerCfg.HeadlightActiveDefault  = PHYSFSX_readByte(file);
@@ -709,6 +979,8 @@ int read_player_file()
 		PHYSFS_seek( file, PHYSFS_tell(file)+(sizeof(ubyte)*MAX_CONTROLS*3) ); // Skip obsolete Flightstick/Thrustmaster/Gravis map fields
 		if (PHYSFS_read(file, &PlayerCfg.KeySettings[2], sizeof(PlayerCfg.KeySettings[2]),1)!=1)
 			goto read_player_file_failed;
+		if (player_file_version < 25)
+			clear_observer_control_settings();
 		PHYSFS_seek( file, PHYSFS_tell(file)+(sizeof(ubyte)*MAX_CONTROLS) ); // Skip obsolete Cyberman map field
 		if (player_file_version>=20)
 			PHYSFS_seek( file, PHYSFS_tell(file)+(sizeof(ubyte)*MAX_CONTROLS) ); // Skip obsolete Winjoy map field
@@ -792,6 +1064,13 @@ int read_player_file()
 		if (player_file_version >= 24) 
 			PHYSFSX_readString(file, buf);			// Just read it in fpr DPS.
 	}
+
+	if (player_file_version >= 26) {
+		if (PHYSFS_read(file, PlayerCfg.ObserverControlSettings,
+				sizeof(PlayerCfg.ObserverControlSettings), 1) != 1)
+			goto read_player_file_failed;
+	} else if (player_file_version == 25)
+		migrate_observer_control_settings();
 
 	if (!PHYSFS_close(file))
 		goto read_player_file_failed;
@@ -905,7 +1184,7 @@ int write_player_file()
 	PHYSFSX_writeU8(file, PlayerCfg.DefaultDifficulty);
 	PHYSFSX_writeU8(file, PlayerCfg.AutoLeveling);
 	PHYSFSX_writeU8(file, PlayerCfg.ReticleType==RET_TYPE_NONE?0:1);
-	PHYSFSX_writeU8(file, PlayerCfg.CockpitMode[0]);
+	PHYSFSX_writeU8(file, PlayerCfg.PreferredCockpitMode);
 	PHYSFS_seek(file,PHYSFS_tell(file)+sizeof(PHYSFS_uint8)); // skip Default_display_mode
 	PHYSFSX_writeU8(file, PlayerCfg.MissileViewEnabled);
 	PHYSFSX_writeU8(file, PlayerCfg.HeadlightActiveDefault);
@@ -984,6 +1263,10 @@ int write_player_file()
 		PHYSFSX_writeString(file, buf);		// Write out current joystick for player.
 	}
 
+	if (PHYSFS_write(file, PlayerCfg.ObserverControlSettings,
+			sizeof(PlayerCfg.ObserverControlSettings), 1) != 1)
+		goto write_player_file_failed;
+
 	if (!PHYSFS_close(file))
 		goto write_player_file_failed;
 
@@ -1015,18 +1298,26 @@ int get_lifetime_checksum (int a,int b)
 // read stored values from ngp file to netgame_info
 void read_netgame_profile(netgame_info *ng)
 {
-	char filename[PATH_MAX], line[50], *token, *value, *ptr;
+	char filename[PATH_MAX];
 	PHYSFS_file *file;
 
 	memset(filename, '\0', PATH_MAX);
 	snprintf(filename, PATH_MAX, GameArg.SysUsePlayersDir? "Players/%.8s.ngp" : "%.8s.ngp", Players[Player_num].callsign);
 	if (!PHYSFSX_exists(filename,0))
 		return;
+	read_netgame_settings_file(filename, ng, 0);
+}
+
+// returns 0 if ok or errno if failed
+int read_netgame_settings_file(const char *filename, netgame_info *ng, int no_name)
+{
+	char line[50], *token, *value, *ptr;
+	PHYSFS_file *file;
 
 	file = PHYSFSX_openReadBuffered(filename);
 
 	if (!file)
-		return;
+		return errno;
 
 	// NOTE that we do not set any defaults here or even initialize netgame_info. For flexibility, leave that to the function calling this.
 	while (!PHYSFS_eof(file))
@@ -1041,7 +1332,7 @@ void read_netgame_profile(netgame_info *ng)
 			value = strtok(NULL, "=");
 			if (!value)
 				value = "";
-			if (!strcmp(token, "game_name"))
+			if (!strcmp(token, "game_name") && !no_name)
 			{
 				char * p;
 				strncpy( ng->game_name, value, NETGAME_NAME_LEN+1 );
@@ -1054,6 +1345,13 @@ void read_netgame_profile(netgame_info *ng)
 				ng->RefusePlayers = strtol(value, NULL, 10);
 			else if (!strcmp(token, "difficulty"))
 				ng->difficulty = strtol(value, NULL, 10);
+			else if (!strcmp(token, "max_numplayers"))
+				ng->max_numplayers = strtol(value, NULL, 10);
+			else if (!strcmp(token, "max_numobservers")) {
+				ng->max_numobservers = strtol(value, NULL, 10);
+				if (ng->max_numobservers > MAX_OBSERVERS)
+					ng->max_numobservers = MAX_OBSERVERS; // a bad preset would overrun observers[] and multibuf
+			}
 			else if (!strcmp(token, "game_flags"))
 				ng->game_flags = strtol(value, NULL, 10);
 			else if (!strcmp(token, "AllowedItems"))
@@ -1068,8 +1366,10 @@ void read_netgame_profile(netgame_info *ng)
 				ng->BrightPlayers = strtol(value, NULL, 10);
 			else if (!strcmp(token, "SpawnStyle"))
 				ng->SpawnStyle = strtol(value, NULL, 10);	
-			//else if (!strcmp(token, "GaussAmmoStyle"))
-			//	ng->GaussAmmoStyle = strtol(value, NULL, 10);	
+			else if (!strcmp(token, "NewSpawnAlgorithm"))
+				ng->NewSpawnAlgorithm = strtol(value, NULL, 10);
+			else if (!strcmp(token, "GaussAmmoStyle"))
+				ng->GaussAmmoStyle = strtol(value, NULL, 10);
 			else if (!strcmp(token, "KillGoal"))
 				ng->KillGoal = strtol(value, NULL, 10);
 			else if (!strcmp(token, "PlayTimeAllowed"))
@@ -1101,7 +1401,27 @@ void read_netgame_profile(netgame_info *ng)
 			else if (!strcmp(token, "BornWithBurner"))
 				ng->BornWithBurner = strtol(value, NULL, 10);	
 			else if (!strcmp(token, "OriginalD1Weapons"))
-				ng->OriginalD1Weapons = strtol(value, NULL, 10);										
+				ng->OriginalD1Weapons = strtol(value, NULL, 10);
+			else if (!strcmp(token, "PrimaryDupFactor"))
+				ng->PrimaryDupFactor = strtol(value, NULL, 10);
+			else if (!strcmp(token, "SecondaryDupFactor"))
+				ng->SecondaryDupFactor = strtol(value, NULL, 10);
+			else if (!strcmp(token, "SecondaryCapFactor"))
+				ng->SecondaryCapFactor = strtol(value, NULL, 10);
+			else if (!strcmp(token, "obs_delay"))
+				ng->obs_delay = strtol(value, NULL, 10);
+			else if (!strcmp(token, "obs_min"))
+				ng->obs_min = strtol(value, NULL, 10);
+			else if (!strcmp(token, "HomingUpdateRate"))
+				ng->HomingUpdateRate = strtol(value, NULL, 10);
+			else if (!strcmp(token, "RemoteHitSpark"))
+				ng->RemoteHitSpark = strtol(value, NULL, 10);
+			else if (!strcmp(token, "AllowCustomModelsTextures"))
+				ng->AllowCustomModelsTextures = strtol(value, NULL, 10);
+			else if (!strcmp(token, "ReducedFlash"))
+				ng->ReducedFlash = strtol(value, NULL, 10);
+			else if (!strcmp(token, "DisableGaussSplash"))
+				ng->DisableGaussSplash = strtol(value, NULL, 10);
 #ifdef USE_TRACKER
 			else if (!strcmp(token, "Tracker"))
 				ng->Tracker = strtol(value, NULL, 10);
@@ -1110,6 +1430,8 @@ void read_netgame_profile(netgame_info *ng)
 	}
 
 	PHYSFS_close(file);
+
+	return 0;
 }
 
 // write values from netgame_info to ngp file
@@ -1120,15 +1442,26 @@ void write_netgame_profile(netgame_info *ng)
 
 	memset(filename, '\0', PATH_MAX);
 	snprintf(filename, PATH_MAX, GameArg.SysUsePlayersDir? "Players/%.8s.ngp" : "%.8s.ngp", Players[Player_num].callsign);
+	write_netgame_settings_file(filename, ng, 0);
+}
+
+// returns 0 if ok or errno if failed
+int write_netgame_settings_file(const char *filename, netgame_info *ng, int no_name)
+{
+	PHYSFS_file *file;
+
 	file = PHYSFSX_openWriteBuffered(filename);
 
 	if (!file)
-		return;
+		return errno;
 
-	PHYSFSX_printf(file, "game_name=%s\n", ng->game_name);
+	if (!no_name)
+		PHYSFSX_printf(file, "game_name=%s\n", ng->game_name);
 	PHYSFSX_printf(file, "gamemode=%i\n", ng->gamemode);
 	PHYSFSX_printf(file, "RefusePlayers=%i\n", ng->RefusePlayers);
 	PHYSFSX_printf(file, "difficulty=%i\n", ng->difficulty);
+	PHYSFSX_printf(file, "max_numplayers=%i\n", ng->max_numplayers);
+	PHYSFSX_printf(file, "max_numobservers=%i\n", ng->max_numobservers);
 	PHYSFSX_printf(file, "game_flags=%i\n", ng->game_flags);
 	PHYSFSX_printf(file, "AllowedItems=%i\n", ng->AllowedItems);
 	PHYSFSX_printf(file, "Allow_marker_view=%i\n", ng->Allow_marker_view);
@@ -1136,7 +1469,8 @@ void write_netgame_profile(netgame_info *ng)
 	PHYSFSX_printf(file, "ShowEnemyNames=%i\n", ng->ShowEnemyNames);
 	PHYSFSX_printf(file, "BrightPlayers=%i\n", ng->BrightPlayers);
 	PHYSFSX_printf(file, "SpawnStyle=%i\n", ng->SpawnStyle);
-	//PHYSFSX_printf(file, "GaussAmmoStyle=%i\n", ng->GaussAmmoStyle);
+	PHYSFSX_printf(file, "NewSpawnAlgorithm=%i\n", ng->NewSpawnAlgorithm);
+	PHYSFSX_printf(file, "GaussAmmoStyle=%i\n", ng->GaussAmmoStyle);
 	PHYSFSX_printf(file, "KillGoal=%i\n", ng->KillGoal);
 	PHYSFSX_printf(file, "PlayTimeAllowed=%i\n", ng->PlayTimeAllowed);
 	PHYSFSX_printf(file, "control_invul_time=%i\n", ng->control_invul_time);
@@ -1153,6 +1487,16 @@ void write_netgame_profile(netgame_info *ng)
 	PHYSFSX_printf(file, "BlackAndWhitePyros=%i\n", ng->BlackAndWhitePyros);
 	PHYSFSX_printf(file, "BornWithBurner=%i\n", ng->BornWithBurner);
 	PHYSFSX_printf(file, "OriginalD1Weapons=%i\n", ng->OriginalD1Weapons);
+	PHYSFSX_printf(file, "PrimaryDupFactor=%i\n", ng->PrimaryDupFactor);
+	PHYSFSX_printf(file, "SecondaryDupFactor=%i\n", ng->SecondaryDupFactor);
+	PHYSFSX_printf(file, "SecondaryCapFactor=%i\n", ng->SecondaryCapFactor);
+	PHYSFSX_printf(file, "obs_delay=%i\n", ng->obs_delay);
+	PHYSFSX_printf(file, "obs_min=%i\n", ng->obs_min);
+	PHYSFSX_printf(file, "HomingUpdateRate=%i\n", ng->HomingUpdateRate);
+	PHYSFSX_printf(file, "RemoteHitSpark=%i\n", ng->RemoteHitSpark);
+	PHYSFSX_printf(file, "AllowCustomModelsTextures=%i\n", ng->AllowCustomModelsTextures);
+	PHYSFSX_printf(file, "ReducedFlash=%i\n", ng->ReducedFlash);
+	PHYSFSX_printf(file, "DisableGaussSplash=%i\n", ng->DisableGaussSplash);
 	
 #ifdef USE_TRACKER
 	PHYSFSX_printf(file, "Tracker=%i\n", ng->Tracker);
@@ -1162,4 +1506,6 @@ void write_netgame_profile(netgame_info *ng)
 	PHYSFSX_printf(file, "ngp version=%s\n",VERSION);
 
 	PHYSFS_close(file);
+
+	return 0;
 }

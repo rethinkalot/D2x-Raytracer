@@ -11,7 +11,8 @@
 #if defined(__MACH__) && defined(__APPLE__)
 #include <sys/mount.h>
 #include <unistd.h>	// for chdir hack
-#include <HIServices/Processes.h>
+#include <CoreServices/CoreServices.h>
+#include <ApplicationServices/ApplicationServices.h>
 #endif
 
 #include "physfsx.h"
@@ -29,19 +30,28 @@ void PHYSFSX_init(int argc, char *argv[])
 #endif
 #if defined(__unix__)
 	char *path = NULL;
+	char *appimage;
 #endif
+	char *base_dir;
 #ifdef macintosh	// Mac OS 9
-	char base_dir[PATH_MAX];
 	int bundle = 0;
-#else
-#define base_dir PHYSFS_getBaseDir()
 #endif
 	
 	PHYSFS_init(argv[0]);
 	PHYSFS_permitSymbolicLinks(1);
+	base_dir = strdup(PHYSFS_getBaseDir());
 	
+#ifdef __unix__
+	if ((appimage = getenv("APPIMAGE")))
+	{
+		char *p;
+		free(base_dir);
+		base_dir = strdup(appimage);
+		if ((p = strrchr(base_dir, '/')))
+			p[1] = 0;
+	}
+#endif
 #ifdef macintosh
-	strcpy(base_dir, PHYSFS_getBaseDir());
 	if (strstr(base_dir, ".app:Contents:MacOSClassic"))	// the Mac OS 9 program is still in the .app bundle
 	{
 		char *p;
@@ -61,9 +71,9 @@ void PHYSFSX_init(int argc, char *argv[])
 	
 #if defined(__unix__)
 # if !(defined(__APPLE__) && defined(__MACH__))
-	path = "~/.d2x-rebirth/";
+	path = "~/.d2x-redux/";
 # else
-	path = "~/Library/Preferences/D2X Rebirth/";
+	path = "~/Library/Preferences/D2X Redux/";
 # endif
 	
 	if (path[0] == '~') // yes, this tilde can be put before non-unix paths.
@@ -133,7 +143,7 @@ void PHYSFSX_init(int argc, char *argv[])
 	
 	PHYSFSX_addRelToSearchPath("data", 1);	// 'Data' subdirectory
 	
-	// For Macintosh, add the 'Resources' directory in the .app bundle to the searchpaths
+	// For Macintosh, search the same path as the .app.
 #if defined(__APPLE__) && defined(__MACH__)
 	{
 		ProcessSerialNumber psn = { 0, kCurrentProcess };
@@ -146,9 +156,12 @@ void PHYSFSX_init(int argc, char *argv[])
 		
 		if (err == noErr)
 		{
-			strncat(fullPath, "/Contents/Resources/", PATH_MAX + 4 - strlen(fullPath));
+			// We now need to look into the same directory as the .app, not into any subdirectories.
+			//strncat(fullPath, "/Contents/Resources/", PATH_MAX + 4 - strlen(fullPath));
+			strncat(fullPath, "/..", PATH_MAX + 4 - strlen(fullPath));
 			fullPath[PATH_MAX + 4] = '\0';
 			PHYSFS_addToSearchPath(fullPath, 1);
+			PHYSFSX_addRelToSearchPath("data", 1);	// 'Data' subdirectory
 		}
 	}
 #elif defined(macintosh)
@@ -161,6 +174,7 @@ void PHYSFSX_init(int argc, char *argv[])
 		PHYSFS_addToSearchPath(base_dir, 1);
 	}
 #endif
+	free(base_dir);
 }
 
 // Add a searchpath, but that searchpath is relative to an existing searchpath
@@ -214,18 +228,18 @@ void PHYSFSX_listSearchPathContent()
 {
 	char **i, **list;
 
-	con_printf(CON_DEBUG, "PHYSFS: Listing contents of Search Path.\n");
+	con_printf(CON_VERBOSE, "PHYSFS: Listing contents of Search Path.\n");
 	list = PHYSFS_getSearchPath();
 	for (i = list; *i != NULL; i++)
-		con_printf(CON_DEBUG, "PHYSFS: [%s] is in the Search Path.\n", *i);
+		con_printf(CON_VERBOSE, "PHYSFS: [%s] is in the Search Path.\n", *i);
 	PHYSFS_freeList(list);
 
 	list = PHYSFS_enumerateFiles("");
 	for (i = list; *i != NULL; i++)
-		con_printf(CON_DEBUG, "PHYSFS: * We've got [%s].\n", *i);
+		con_printf(CON_VERBOSE, "PHYSFS: * We've got [%s].\n", *i);
 	PHYSFS_freeList(list);
 	
-	con_printf(CON_DEBUG, "\n");
+	con_printf(CON_VERBOSE, "\n");
 }
 
 // checks which archives are supported by PhysFS. Return 0 if some essential (HOG) is not supported
@@ -234,10 +248,10 @@ int PHYSFSX_checkSupportedArchiveTypes()
 	const PHYSFS_ArchiveInfo **i;
 	int hog_sup = 0, mvl_sup = 0;
 
-	con_printf(CON_DEBUG, "PHYSFS: Checking supported archive types.\n");
+	con_printf(CON_VERBOSE, "PHYSFS: Checking supported archive types.\n");
 	for (i = PHYSFS_supportedArchiveTypes(); *i != NULL; i++)
 	{
-		con_printf(CON_DEBUG, "PHYSFS: Supported archive: [%s], which is [%s].\n", (*i)->extension, (*i)->description);
+		con_printf(CON_VERBOSE, "PHYSFS: Supported archive: [%s], which is [%s].\n", (*i)->extension, (*i)->description);
 		if (!d_stricmp((*i)->extension, "HOG"))
 			hog_sup = 1;
 		if (!d_stricmp((*i)->extension, "MVL"))
@@ -468,7 +482,7 @@ void PHYSFSX_addArchiveContent()
 	char *file[2];
 	int i = 0, content_updated = 0;
 
-	con_printf(CON_DEBUG, "PHYSFS: Adding archives to the game.\n");
+	con_printf(CON_VERBOSE, "PHYSFS: Adding archives to the game.\n");
 	// find files in Searchpath ...
 	list = PHYSFSX_findFiles("", archive_exts);
 	// if found, add them...
@@ -480,7 +494,7 @@ void PHYSFSX_addArchiveContent()
 		PHYSFSX_getRealPath(file[0],file[1]);
 		if (PHYSFS_addToSearchPath(file[1], 0))
 		{
-			con_printf(CON_DEBUG, "PHYSFS: Added %s to Search Path\n",file[1]);
+			con_printf(CON_VERBOSE, "PHYSFS: Added %s to Search Path\n",file[1]);
 			content_updated = 1;
 		}
 		d_free(file[0]);
@@ -501,7 +515,7 @@ void PHYSFSX_addArchiveContent()
 		PHYSFSX_getRealPath(file[0],file[1]);
 		if (PHYSFS_mount(file[1], DEMO_DIR, 0))
 		{
-			con_printf(CON_DEBUG, "PHYSFS: Added %s to %s\n",file[1], DEMO_DIR);
+			con_printf(CON_VERBOSE, "PHYSFS: Added %s to %s\n",file[1], DEMO_DIR);
 			content_updated = 1;
 		}
 		d_free(file[0]);
@@ -514,7 +528,7 @@ void PHYSFSX_addArchiveContent()
 
 	if (content_updated)
 	{
-		con_printf(CON_DEBUG, "Game content updated!\n");
+		con_printf(CON_VERBOSE, "Game content updated!\n");
 		PHYSFSX_listSearchPathContent();
 	}
 }

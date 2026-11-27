@@ -6,11 +6,21 @@
  */
 
 #include "player.h"
+#include "multi.h"
+#include "hudmsg.h"
 #include "byteswap.h"
+#include "playsave.h"
 
 int RespawningConcussions[MAX_PLAYERS]; 
 int VulcanAmmoBoxesOnBoard[MAX_PLAYERS];
 int VulcanBoxAmmo[MAX_PLAYERS]; 
+vms_vector Last_pos; // Saved position of observer prior to following a player.
+vms_matrix Last_orient; // Saved orientation of observer prior to following a player.
+fix Last_real_update; // How long ago in seconds the observed player's real position got updated.
+vms_vector Real_pos; // The observed player's position.
+vms_matrix Real_orient; // The observed player's orientation.
+vms_vector Real_raw_pos; // The observed player's raw (un-offset) position.
+vms_matrix Real_raw_orient; // The observed player's raw (un-offset) orientation.
 
 void player_rw_swap(player_rw *p, int swap)
 {
@@ -68,4 +78,41 @@ void player_ship_read(player_ship *ps, PHYSFS_file *fp)
 	ps->max_rotthrust = PHYSFSX_readFix(fp);
 	for (i = 0; i < N_PLAYER_GUNS; i++)
 		PHYSFSX_readVector(&(ps->gun_points[i]), fp);
+}
+
+void reset_obs_at(const char *func, int line) {
+	if (!is_observing_player())
+		return;
+
+	Current_obs_player = Player_num;
+	// Force the cockpit mode back to full screen, since we don't have data for the gauges.
+	select_cockpit(CM_FULL_SCREEN);
+
+	Objects[Players[Current_obs_player].objnum].pos = Last_pos;
+	Objects[Players[Current_obs_player].objnum].orient = Last_orient;
+	ConsoleObject->pos = Last_pos;
+	ConsoleObject->orient = Last_orient;
+	HUD_init_message_literal(HM_MULTI, "Observing freely.");
+}
+
+void set_obs(int pnum) {
+	if (Netgame.host_is_obs && pnum == 0) {
+		reset_obs();
+		return;
+	}
+
+	if (!is_observing_player()) {
+		Last_pos = Objects[Players[Player_num].objnum].pos;
+		Last_orient = Objects[Players[Player_num].objnum].orient;
+	}
+
+	if (Players[pnum].connected == CONNECT_PLAYING) {
+		if (Current_obs_player != pnum) {
+			HUD_init_message(HM_DEFAULT, "Observing %s!", Players[pnum].callsign);
+		}
+		Current_obs_player = pnum;
+		select_cockpit(can_draw_observer_cockpit() ? PlayerCfg.PreferredCockpitMode : CM_FULL_SCREEN);
+	} else {
+		reset_obs();
+	}
 }

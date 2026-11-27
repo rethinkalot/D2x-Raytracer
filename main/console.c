@@ -9,7 +9,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <time.h>
-#include <SDL/SDL.h>
+#include <SDL.h>
 #include "window.h"
 #include "console.h"
 #include "args.h"
@@ -19,6 +19,7 @@
 #include "key.h"
 #include "vers_id.h"
 #include "timer.h"
+void menu_frame_delay(void); // game.c
 
 static PHYSFS_file *gamelog_fp=NULL;
 static struct console_buffer con_buffer[CON_LINES_MAX];
@@ -47,24 +48,61 @@ static void con_add_buffer_line(int priority, char *buffer)
 	}
 }
 
+/* Decide whether a message at the given priority should be emitted at all.
+ *
+ * Two tiers are gated on a specific flag rather than on the numeric level,
+ * because -debug raises the level above CON_VERBOSE and the two flag
+ * combinations have to stay distinguishable:
+ *
+ *   -debug   : SLikeNet / network telemetry (the CON_NET_* priorities)
+ *   -verbose : event, input and window diagnostics (CON_VERBOSE)
+ *
+ * Either flag on its own shows only its own tier; both together show both.
+ * Everything else keeps the plain level comparison, so CON_DEBUG rides on
+ * -debug and the notices below it are always emitted. */
+static int con_priority_enabled(int priority)
+{
+	if (CON_IS_NET_PRIORITY(priority))
+		return (int)GameArg.DbgVerbose >= CON_DEBUG;
+
+	if (priority == CON_VERBOSE)
+		return GameArg.DbgVerboseGiven;
+
+	return priority <= (int)GameArg.DbgVerbose;
+}
+
 void con_printf(int priority, const char *fmt, ...)
 {
 	va_list arglist;
 	char buffer[CON_LINE_LENGTH];
+	char display_buffer[CON_LINE_LENGTH];
 
-	memset(buffer,'\0',CON_LINE_LENGTH);
-
-	if (priority <= ((int)GameArg.DbgVerbose))
+	if (con_priority_enabled(priority))
 	{
+		memset(buffer, '\0', CON_LINE_LENGTH);
+		memset(display_buffer, '\0', CON_LINE_LENGTH);
+
 		char *p1, *p2;
 
 		va_start (arglist, fmt);
 		vsprintf (buffer,  fmt, arglist);
 		va_end (arglist);
 
-		/* Produce a sanitised version and send it to the console */
-		p1 = p2 = buffer;
+		/* Strip terminal ANSI codes for the game console and saved log. */
+		memcpy(display_buffer, buffer, CON_LINE_LENGTH);
+		p1 = p2 = display_buffer;
 		do
+		{
+			if (*p1 == '\033' && p1[1] == '[')
+			{
+				p1 += 2;
+				while (*p1 && !((*p1 >= 'A' && *p1 <= 'Z') ||
+					(*p1 >= 'a' && *p1 <= 'z')))
+					p1++;
+				if (*p1)
+					p1++;
+				continue;
+			}
 			switch (*p1)
 			{
 				case CC_COLOR:
@@ -76,13 +114,14 @@ void con_printf(int priority, const char *fmt, ...)
 				default:
 					*p2++ = *p1++;
 			}
+		}
 		while (*p1);
 		*p2 = 0;
 
 		/* add given string to con_buffer */
-		con_add_buffer_line(priority, buffer);
+		con_add_buffer_line(priority, display_buffer);
 
-		/* Print output to stdout */
+		/* Preserve ANSI coloring on terminals; save sanitized text below. */
 		printf("%s",buffer);
 
 		/* Print output to gamelog.txt */
@@ -100,7 +139,7 @@ void con_printf(int priority, const char *fmt, ...)
 				buffer[strlen(buffer)]='\n';
 			}
 #endif
-			PHYSFSX_printf(gamelog_fp,"%s",buffer);
+			PHYSFSX_printf(gamelog_fp,"%s",display_buffer);
 		}
 	}
 }
@@ -126,6 +165,18 @@ static void con_draw(void)
 
 		switch (con_buffer[CON_LINES_MAX-1-i].priority)
 		{
+			case CON_NET_TX:
+				gr_set_fontcolor(BM_XRGB(63,32,0),-1);
+				break;
+			case CON_NET_RX:
+				gr_set_fontcolor(BM_XRGB(0,0,40),-1);
+				break;
+			case CON_NET_STATUS:
+				gr_set_fontcolor(BM_XRGB(0,63,0),-1);
+				break;
+			case CON_NET_DEALLOC:
+				gr_set_fontcolor(BM_XRGB(63,0,0),-1);
+				break;
 			case CON_CRITICAL:
 				gr_set_fontcolor(BM_XRGB(28,0,0),-1);
 				break;
@@ -209,7 +260,7 @@ static int con_handler(window *wind, d_event *event)
 			return 1;
 
 		case EVENT_WINDOW_DRAW:
-			timer_delay2(50);
+			menu_frame_delay();
 			if (con_state == CON_STATE_OPENING)
 			{
 				if (con_size < CON_LINES_ONSCREEN && timer_query() >= last_scroll_time+(F1_0/30))
@@ -278,14 +329,50 @@ static void con_close(void)
 	gamelog_fp = NULL;
 }
 
+// Used by the crash handler: put buffered gamelog lines on disk before the game dies
+void con_flush_log(void)
+{
+	if (gamelog_fp)
+		PHYSFS_flush(gamelog_fp);
+}
+
 void con_init(void)
 {
 	memset(con_buffer,0,sizeof(con_buffer));
 
-	if (GameArg.DbgSafelog)
-		gamelog_fp = PHYSFS_openWrite("gamelog.txt");
-	else
-		gamelog_fp = PHYSFSX_openWriteBuffered("gamelog.txt");
+	// Keep the previous run's log as gamelog-prev.txt (one gamelog per game start, rejoins included)
+	if (!GameArg.GameLogTimeStamp)
+	{
+		PHYSFS_delete("gamelog-prev.txt");
+		PHYSFSX_rename("gamelog.txt", "gamelog-prev.txt");
+	}
+	con_switch_log(NULL);
+
 	atexit(con_close);
 }
 
+void con_switch_log(const char* filename)
+{
+	char filenameBuffer[PATH_MAX];
+	const char* filenameToUse = filename;
+
+	con_close();
+
+	if (filename == NULL) {
+		// Switch to default log filename
+		if (GameArg.GameLogTimeStamp) {
+			time_t now = time(NULL);
+			struct tm *t = localtime(&now);
+			snprintf(filenameBuffer, SDL_arraysize(filenameBuffer), "gamelog-%04d%02d%02d-%02d%02d%02d.txt",
+				t->tm_year + 1900, t->tm_mon + 1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
+		} else {
+			strcpy(filenameBuffer, "gamelog.txt");
+		}
+		filenameToUse = filenameBuffer;
+	}
+
+	if (GameArg.DbgSafelog)
+		gamelog_fp = PHYSFS_openWrite(filenameToUse);
+	else
+		gamelog_fp = PHYSFSX_openWriteBuffered(filenameToUse);
+}

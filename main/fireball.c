@@ -70,6 +70,11 @@ object *object_create_explosion_sub(object *objp, short segnum, vms_vector * pos
 {
 	int objnum;
 	object *obj;
+	int obj_type = objp ? objp->type : OBJ_WALL;
+
+	// workaround for missing type checks in original code
+	if (obj_type != OBJ_WEAPON && obj_type != OBJ_PLAYER)
+		objp = NULL;
 
 	objnum = obj_create( OBJ_FIREBALL,vclip_type,segnum,position,&vmd_identity_matrix,size,
 					CT_EXPLOSION,MT_NONE,RT_FIREBALL);
@@ -107,7 +112,7 @@ object *object_create_explosion_sub(object *objp, short segnum, vms_vector * pos
 				if ((Objects[parent].type != OBJ_ROBOT) || (Objects[parent].id != obj0p->id))
 					parent_check = 1;
 
-			if ( (obj0p!=objp) && !(obj0p->flags&OF_SHOULD_BE_DEAD) && ((obj0p->type==OBJ_WEAPON && (obj0p->id==PROXIMITY_ID || obj0p->id==SUPERPROX_ID || obj0p->id==PMINE_ID)) || (obj0p->type == OBJ_CNTRLCEN) || (obj0p->type==OBJ_PLAYER) || ((obj0p->type==OBJ_ROBOT) && parent_check))) {
+			if ( (obj0p!=objp) && !(obj0p->flags&OF_SHOULD_BE_DEAD) && ((obj0p->type==OBJ_WEAPON && (obj0p->id==PROXIMITY_ID || obj0p->id==SUPERPROX_ID || obj0p->id==PMINE_ID)) || (obj0p->type == OBJ_CNTRLCEN) || ((obj0p->type==OBJ_PLAYER) && !(is_observer() && obj0p == ConsoleObject)) || ((obj0p->type==OBJ_ROBOT) && parent_check))) { // an observer's camera ship takes no blast damage or push
 				dist = vm_vec_dist_quick( &obj0p->pos, &obj->pos );
 				// Make damage be from 'maxdamage' to 0.0, where 0.0 is 'maxdistance' away;
 				if ( dist < maxdistance ) {
@@ -270,13 +275,22 @@ object *object_create_explosion_sub(object *objp, short segnum, vms_vector * pos
 												weapon_name = "unknown";
 										}
 										 
-										con_printf(CON_NORMAL, "You took %0.1f damage from %s's %s blast!\n", (double)(damage)/(double)(F1_0), killer_name, weapon_name); 
+										con_printf(CON_NORMAL, "You took %.1f damage from %s's %s blast, shields now %.1f\n", f2fl(damage), killer_name, weapon_name, f2fl(Players[Player_num].shields - damage));
+
+										multi_send_damage(damage, obj0p->shields, killer->type, killer->id, DAMAGE_BLAST, objp);
+									} else if ((obj0p->id == Player_num) && (! Player_is_dead)) {
+										con_printf(CON_NORMAL, "You took %.1f damage from a %s blast, shields now %.1f\n",
+											f2fl(damage),
+											obj_type == OBJ_WALL ? "wall" : obj_type == OBJ_ROBOT ? "robot" : "unknown",
+											f2fl(Players[Player_num].shields - damage));
+
+										multi_send_damage(damage, obj0p->shields, obj_type, 0, DAMAGE_BLAST, objp);
 									}
 
 									// Splash damage hits the shields too: ripple on the
-									// side facing the blast.
+									// side facing the blast. Explosions CAN be friendly fire.
 									shieldfx_player_hit(obj0p, objp, position, damage);
-									apply_damage_to_player(obj0p, killer, damage, 0 );
+									apply_damage_to_player(obj0p, killer, damage, 1);
 								}
 							}
 								break;
@@ -660,7 +674,12 @@ int choose_drop_segment()
 	while ((segnum == -1) && (cur_drop_depth > BASE_NET_DROP_DEPTH/2)) {
 		pnum = (d_rand() * N_players) >> 15;
 		count = 0;
-		while ((count < N_players) && ((Players[pnum].connected == CONNECT_DISCONNECTED) || (pnum==Player_num) || ((Game_mode & (GM_TEAM|GM_CAPTURE)) && (get_team(pnum)==get_team(Player_num))))) {
+		while ((count < N_players) && (
+			(Players[pnum].connected == CONNECT_DISCONNECTED) || // skip disconnected players
+			(pnum==Player_num) || // skip ourselves
+			((Game_mode & (GM_TEAM|GM_CAPTURE)) && (get_team(pnum)==get_team(Player_num))) || // also skip our teammates
+			(Netgame.host_is_obs && pnum == 0) // and skip observers
+			)) {
 			pnum = (pnum+1)%N_players;
 			count++;
 		}
@@ -786,6 +805,41 @@ void maybe_drop_net_powerup(int powerup_type)
 }
 
 //	------------------------------------------------------------------------------------------------------
+//	"Flags return to base" CTF option: put a flag in a goal of its own colour (the blue flag in the blue
+//	goal), for everyone. A level with no goal of that colour drops it like before.
+void ctf_drop_flag_at_goal(int flag_id)
+{
+	int goal = (flag_id == POW_FLAG_BLUE) ? SEGMENT_IS_GOAL_BLUE : SEGMENT_IS_GOAL_RED;
+	int segnum, objnum;
+	vms_vector new_pos;
+
+	if (Control_center_destroyed || Endlevel_sequence)
+		return;
+	for (segnum = 0; segnum <= Highest_segment_index; segnum++)
+		if (Segment2s[segnum].special == goal)
+			break;
+	if (segnum > Highest_segment_index)
+	{
+		maybe_drop_net_powerup(flag_id);
+		return;
+	}
+
+	Net_create_loc = 0;
+	objnum = call_object_create_egg(&Objects[Players[Player_num].objnum], 1, OBJ_POWERUP, flag_id);
+	if (objnum < 0)
+		return;
+
+	compute_segment_center(&new_pos, &Segments[segnum]);
+	multi_send_create_powerup(flag_id, segnum, objnum, &new_pos);
+
+	Objects[objnum].pos = new_pos;
+	vm_vec_zero(&Objects[objnum].mtype.phys_info.velocity);
+	obj_relink(objnum, segnum);
+
+	object_create_explosion(segnum, &new_pos, i2f(5), VCLIP_POWERUP_DISAPPEARANCE );
+}
+
+//	------------------------------------------------------------------------------------------------------
 //	Return true if current segment contains some object.
 int segment_contains_object(int obj_type, int obj_id, int segnum)
 {
@@ -868,7 +922,7 @@ void maybe_replace_powerup_with_energy(object *del_obj)
 	else if (((weapon_index == GAUSS_INDEX) || (del_obj->contains_id == POW_VULCAN_AMMO)) && (Players[Player_num].primary_ammo[VULCAN_INDEX] >= VULCAN_AMMO_MAX))
 		del_obj->contains_count = 0;
 	else if (weapon_index != -1) {
-		if ((player_has_weapon(weapon_index, 0) & HAS_WEAPON_FLAG) || weapon_nearby(del_obj, del_obj->contains_id)) {
+		if ((player_has_weapon(Player_num, weapon_index, 0) & HAS_WEAPON_FLAG) || weapon_nearby(del_obj, del_obj->contains_id)) {
 			if (d_rand() > 16384) {
 				del_obj->contains_type = OBJ_POWERUP;
 				if (weapon_index == VULCAN_INDEX) {
@@ -1336,7 +1390,7 @@ void do_explosion_sequence(object *obj)
 		vclip_num = get_explosion_vclip(del_obj,1);
 
 		if (del_obj->type == OBJ_ROBOT && Robot_info[del_obj->id].badass)
-			expl_obj = object_create_badass_explosion( NULL, del_obj->segnum, spawn_pos, fixmul(del_obj->size, EXPLOSION_SCALE), vclip_num, F1_0*Robot_info[del_obj->id].badass, i2f(4)*Robot_info[del_obj->id].badass, i2f(35)*Robot_info[del_obj->id].badass, -1 );
+			expl_obj = object_create_badass_explosion( del_obj, del_obj->segnum, spawn_pos, fixmul(del_obj->size, EXPLOSION_SCALE), vclip_num, F1_0*Robot_info[del_obj->id].badass, i2f(4)*Robot_info[del_obj->id].badass, i2f(35)*Robot_info[del_obj->id].badass, -1 );
 		else
 			expl_obj = object_create_explosion( del_obj->segnum, spawn_pos, fixmul(del_obj->size, EXPLOSION_SCALE), vclip_num );
 

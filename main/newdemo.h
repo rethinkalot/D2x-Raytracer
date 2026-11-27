@@ -40,12 +40,18 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 // Gives state of recorder
 extern int Newdemo_state;
+extern int Newdemo_is_autorecord;
 extern int NewdemoFrameCount;
 
 extern int Newdemo_vcr_state;
 extern int Newdemo_game_mode;
 extern sbyte Newdemo_do_interpolate;
 extern int Newdemo_show_percentage;
+
+// The framerate a demo being played back was captured at, derived from its
+// recorded FrameTime values. Purely informational: playback speed is
+// wall-clock based and independent of it. 0 means unknown / not playing back.
+extern int Newdemo_recorded_fps;
 
 //Does demo start automatically?
 extern int Auto_demo;
@@ -67,6 +73,8 @@ extern void newdemo_record_hostage_rescued( int hostage_num );
 extern void newdemo_record_morph_frame(struct morph_data *);
 extern void newdemo_record_player_stats(int shields, int energy, int score );
 extern void newdemo_record_player_afterburner(fix afterburner);
+extern void newdemo_record_player_afterburner_state(ubyte state);
+extern void newdemo_record_multi_afterburner_stop(ubyte pnum);
 extern void newdemo_record_wall_toggle(int segnum, int side );
 extern void newdemo_record_control_center_destroyed();
 extern void newdemo_record_hud_message(const char *s);
@@ -96,6 +104,7 @@ extern void newdemo_record_player_score(int score);
 extern void newdemo_record_multi_score(int pnum, int score);
 extern void newdemo_record_primary_ammo(int new_ammo);
 extern void newdemo_record_secondary_ammo(int new_ammo);
+extern void newdemo_record_bomb_ammo(int bomb);
 extern void newdemo_record_door_opening(int segnum, int side);
 extern void newdemo_record_laser_level(sbyte old_level, sbyte new_level);
 extern void newdemo_record_cloaking_wall(int front_wall_num, int back_wall_num, ubyte type, ubyte state, fix cloak_value, fix l0, fix l1, fix l2, fix l3);
@@ -111,8 +120,8 @@ extern void newdemo_goto_beginning();
 // Interactive functions to control playback/record;
 extern void newdemo_start_playback( char * filename );
 extern void newdemo_stop_playback();
-extern void newdemo_start_recording();
-extern void newdemo_stop_recording();
+extern void newdemo_start_recording(int is_autorecord);
+extern void newdemo_stop_recording(int is_manual);
 
 extern int newdemo_swap_endian(char *filename);
 

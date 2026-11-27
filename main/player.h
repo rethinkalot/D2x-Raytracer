@@ -27,7 +27,9 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "weapon.h"
 
 #define MAX_PLAYERS 8
+#define OBSERVER_PLAYER_ID 7
 #define MAX_MULTI_PLAYERS MAX_PLAYERS+3
+#define MAX_OBSERVERS 16
 
 // Initial player stat values
 #define INITIAL_ENERGY  i2f(100)    // 100% energy to start
@@ -85,6 +87,10 @@ typedef struct player {
 	uint    flags;                  // Powerup flags, see below...
 	fix     energy;                 // Amount of energy remaining.
 	fix     shields;                // shields remaining (protection)
+	fix     shields_delta;          // recent change to shields
+	fix     shields_time;           // the time the shields recently changed
+	sbyte   shields_time_hours;     // the time the shields recently changed (hours)
+	ubyte   shields_certain;        // Whether or not the observer is certain about the player's shield value.
 	ubyte   lives;                  // Lives remaining, 0 = game over.
 	sbyte   level;                  // Current level player is playing. (must be signed for secret levels)
 	ubyte   laser_level;            // Current level of the laser.
@@ -94,6 +100,9 @@ typedef struct player {
 	ushort  secondary_weapon_flags; // bit set indicates the player has this weapon.
 	ushort  primary_ammo[MAX_PRIMARY_WEAPONS]; // How much ammo of each type.
 	ushort  secondary_ammo[MAX_SECONDARY_WEAPONS]; // How much ammo of each type.
+	sbyte   primary_weapon;         // The currently selected primary weapon.
+	sbyte   secondary_weapon;       // The currently selected secondary weapon.
+	fix     afterburner_charge;     // The amount of afterburner charge remaining.
 
 	ushort  pad; // Pad because increased weapon_flags from byte to short -YW 3/22/95
 
@@ -206,11 +215,24 @@ extern int VulcanBoxAmmo[MAX_PLAYERS];
 extern struct object *Guided_missile[MAX_PLAYERS];
 extern int Guided_missile_sig[MAX_PLAYERS];
 
+extern vms_vector Last_pos; // Saved position of observer prior to following a player.
+extern vms_matrix Last_orient; // Saved orientation of observer prior to following a player.
+extern fix Last_real_update; // How long ago in seconds the observed player's real position got updated.
+extern vms_vector Real_pos; // The observed player's position.
+extern vms_matrix Real_orient; // The observed player's orientation.
+extern vms_vector Real_raw_pos; // The observed player's raw (un-offset) position.
+extern vms_matrix Real_raw_orient; // The observed player's raw (un-offset) orientation.
+
 /*
  * reads a player_ship structure from a PHYSFS_file
  */
 void player_ship_read(player_ship *ps, PHYSFS_file *fp);
 
 void player_rw_swap(player_rw *p, int swap);
+
+// Observer setting.
+void reset_obs_at(const char *func, int line);
+#define reset_obs() reset_obs_at(__func__, __LINE__)
+void set_obs(int pnum);
 
 #endif

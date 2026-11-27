@@ -52,10 +52,23 @@ typedef struct _control_info {
 #define NUM_JOYSTICK_CONTROLS  56
 #define NUM_MOUSE_CONTROLS  30
 #define MAX_CONTROLS        60		// there are actually 48, so this leaves room for more
+#define NUM_OBSERVER_CONTROLS 3
+#define NUM_OBSERVER_BINDINGS_PER_ACTION 2
+#define NUM_OBSERVER_BINDING_SLOTS (NUM_OBSERVER_CONTROLS * NUM_OBSERVER_BINDINGS_PER_ACTION)
+#define NUM_OBSERVER_BINDING_TYPES 3
+#define OBSERVER_CONTROL_SETTINGS_START (MAX_CONTROLS - NUM_OBSERVER_CONTROLS)
+
+enum observer_control_action {
+	OBSERVER_CONTROL_NONE,
+	OBSERVER_CONTROL_PREVIOUS_PLAYER,
+	OBSERVER_CONTROL_NEXT_PLAYER,
+	OBSERVER_CONTROL_TOGGLE_MODE
+};
 
 extern control_info Controls;
 extern void kconfig_read_controls(d_event *event, int automap_flag);
 extern void kconfig(int n, char *title);
+extern int kconfig_observer_action(d_event *event);
 
 extern const ubyte DefaultKeySettingsD2X[MAX_D2X_CONTROLS];
 extern const ubyte DefaultKeySettings[3][MAX_CONTROLS];

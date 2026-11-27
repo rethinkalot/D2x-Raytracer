@@ -131,7 +131,10 @@ void digi_get_sound_loc( vms_matrix * listener, vms_vector * listener_pos, int l
 		int num_search_segs = f2i(max_distance/20);
 		if ( num_search_segs < 1 ) num_search_segs = 1;
 
-		path_distance = find_connected_distance(listener_pos, listener_seg, sound_pos, sound_seg, num_search_segs, WID_RENDPAST_FLAG+WID_FLY_FLAG );
+		if (is_observer())
+			path_distance = vm_vec_dist(listener_pos, sound_pos);
+		else
+			path_distance = find_connected_distance(listener_pos, listener_seg, sound_pos, sound_seg, num_search_segs, WID_RENDPAST_FLAG+WID_FLY_FLAG );
 		if ( path_distance > -1 )	{
 			*volume = max_volume - fixdiv(path_distance,max_distance);
 			if (*volume > 0 )	{
@@ -535,6 +538,45 @@ void digi_kill_sound_linked_to_object( int objnum )
 				SoundObjects[i].flags = 0;	// Mark as dead, so some other sound can use this sound
 				killed++;
 			}
+		}
+	}
+}
+
+/* Stop only one sound attached to an object. Demo playback uses this for
+ * afterburner loops so duplicate starts cannot stack and a stop cannot cut
+ * off unrelated sounds attached to the same ship. */
+void digi_kill_sound_linked_to_object_sound( int objnum, int org_soundnum )
+{
+	int i;
+	int soundnum = digi_xlat_sound(org_soundnum);
+
+	for (i = 0; i < MAX_SOUND_OBJECTS; i++) {
+		if ((SoundObjects[i].flags & SOF_USED) && (SoundObjects[i].flags & SOF_LINK_TO_OBJ) &&
+		    SoundObjects[i].link_type.obj.objnum == objnum && SoundObjects[i].soundnum == soundnum) {
+			if (SoundObjects[i].channel > -1) {
+				digi_stop_sound(SoundObjects[i].channel);
+				N_active_sound_objects--;
+			}
+			SoundObjects[i].channel = -1;
+			SoundObjects[i].flags = 0;
+		}
+	}
+}
+
+void digi_kill_sound_linked_to_object_signature_sound( int signature, int org_soundnum )
+{
+	int i;
+	int soundnum = digi_xlat_sound(org_soundnum);
+
+	for (i = 0; i < MAX_SOUND_OBJECTS; i++) {
+		if ((SoundObjects[i].flags & SOF_USED) && (SoundObjects[i].flags & SOF_LINK_TO_OBJ) &&
+		    SoundObjects[i].link_type.obj.objsignature == signature && SoundObjects[i].soundnum == soundnum) {
+			if (SoundObjects[i].channel > -1) {
+				digi_stop_sound(SoundObjects[i].channel);
+				N_active_sound_objects--;
+			}
+			SoundObjects[i].channel = -1;
+			SoundObjects[i].flags = 0;
 		}
 	}
 }

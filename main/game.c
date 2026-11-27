@@ -21,7 +21,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-#include <SDL/SDL.h>
+#include <SDL.h>
 #include <setjmp.h>
 #include "pstypes.h"
 #include "console.h"
@@ -150,6 +150,7 @@ void game_init_render_sub_buffers(int x, int y, int w, int h);
 extern void multi_check_for_killgoal_winner();
 
 extern int ReadControls(d_event *event);		// located in gamecntl.c
+extern void observer_camera_update(void);		// located in gamecntl.c
 extern void do_final_boss_frame(void);
 
 
@@ -184,7 +185,7 @@ void reset_palette_add()
 }
 
 
-u_int32_t Game_screen_mode = SM(640,480);
+u_int32_t Game_screen_mode = SM(960,540);
 
 #ifdef RT_DX12
 #include "RTgr.h"
@@ -208,7 +209,7 @@ void init_cockpit()
         return;
 
     if (Screen_mode == SCREEN_EDITOR)
-        PlayerCfg.CockpitMode[1] = CM_FULL_SCREEN;
+        PlayerCfg.CurrentCockpitMode = CM_FULL_SCREEN;
 
     RT_RendererIO* t_IO = RT_GetRendererIO();
     t_IO->scene_transition = true;
@@ -216,7 +217,7 @@ void init_cockpit()
 
     gr_set_current_canvas(NULL);
 
-    switch (PlayerCfg.CockpitMode[1]) {
+    switch (PlayerCfg.CurrentCockpitMode) {
     case CM_FULL_COCKPIT:
     {
         float height = (SHEIGHT * 2) / 3;
@@ -283,51 +284,55 @@ void init_cockpit()
 		return;
 
 	if ( Screen_mode == SCREEN_EDITOR )
-		PlayerCfg.CockpitMode[1] = CM_FULL_SCREEN;
+		PlayerCfg.CurrentCockpitMode = CM_FULL_SCREEN;
 
 #if !defined(OGL) && !defined(RT_DX12)
-	if ( Game_screen_mode != (GameArg.GfxHiresGFXAvailable? SM(640,480) : SM(320,200)) && PlayerCfg.CockpitMode[1] != CM_LETTERBOX) {
-		PlayerCfg.CockpitMode[1] = CM_FULL_SCREEN;
+	if ( Game_screen_mode != (GameArg.GfxHiresGFXAvailable? SM(640,480) : SM(320,200)) && PlayerCfg.CurrentCockpitMode != CM_LETTERBOX) {
+		PlayerCfg.CurrentCockpitMode = CM_FULL_SCREEN;
 	}
 #endif
 
+	if (is_observer() && !can_draw_observer_cockpit())
+		PlayerCfg.CurrentCockpitMode = CM_FULL_SCREEN;
+
 	gr_set_current_canvas(NULL);
 
-	switch( PlayerCfg.CockpitMode[1] ) {
+	switch (PlayerCfg.CurrentCockpitMode) {
 		case CM_FULL_COCKPIT:
-			game_init_render_sub_buffers(0, 0, SWIDTH, (SHEIGHT*2)/3);
+			game_init_render_sub_buffers(0, 0, SWIDTH, (SHEIGHT * 2) / 3);
 			break;
 
 		case CM_REAR_VIEW:
-		{	int x1 = 0, y1 = 0, x2 = SWIDTH, y2 = (SHEIGHT*2)/3;
-			grs_bitmap *bm;
+		{
+			int x1 = 0, y1 = 0, x2 = SWIDTH, y2 = (SHEIGHT * 2) / 3;
+			grs_bitmap* bm;
 
-			PIGGY_PAGE_IN(cockpit_bitmap[PlayerCfg.CockpitMode[1]+(HIRESMODE?(Num_cockpits/2):0)]);
-			bm=&GameBitmaps[cockpit_bitmap[PlayerCfg.CockpitMode[1]+(HIRESMODE?(Num_cockpits/2):0)].index];
+			PIGGY_PAGE_IN(cockpit_bitmap[PlayerCfg.CurrentCockpitMode]);
+			bm = &GameBitmaps[cockpit_bitmap[PlayerCfg.CurrentCockpitMode].index];
 			gr_bitblt_find_transparent_area(bm, &x1, &y1, &x2, &y2);
-			game_init_render_sub_buffers(x1*((float)SWIDTH/bm->bm_w), y1*((float)SHEIGHT/bm->bm_h), (x2-x1+1)*((float)SWIDTH/bm->bm_w), (y2-y1+2)*((float)SHEIGHT/bm->bm_h));
+			game_init_render_sub_buffers(x1 * ((float)SWIDTH / bm->bm_w), y1 * ((float)SHEIGHT / bm->bm_h), (x2 - x1 + 1) * ((float)SWIDTH / bm->bm_w), (y2 - y1 + 2) * ((float)SHEIGHT / bm->bm_h));
 			break;
 		}
-
 		case CM_FULL_SCREEN:
 			game_init_render_sub_buffers(0, 0, SWIDTH, SHEIGHT);
 			break;
 
 		case CM_STATUS_BAR:
-			game_init_render_sub_buffers( 0, 0, SWIDTH, (HIRESMODE?(SHEIGHT*2)/2.6:(SHEIGHT*2)/2.72) );
+			game_init_render_sub_buffers(0, 0, SWIDTH, (HIRESMODE ? (SHEIGHT * 2) / 2.6 : (SHEIGHT * 2) / 2.72));
 			break;
 
-		case CM_LETTERBOX:	{
-			int x,y,w,h;
+		case CM_LETTERBOX:
+		{
+			int x, y, w, h;
 
 			x = 0; w = SM_W(Game_screen_mode);
 			h = (SM_H(Game_screen_mode) * 3) / 4; // true letterbox size (16:9)
-			y = (SM_H(Game_screen_mode)-h)/2;
+			y = (SM_H(Game_screen_mode) - h) / 2;
 
-			gr_rect(x,0,w,SM_H(Game_screen_mode)-h);
-			gr_rect(x,SM_H(Game_screen_mode)-h,w,SM_H(Game_screen_mode));
+			gr_rect(x, 0, w, SM_H(Game_screen_mode) - h);
+			gr_rect(x, SM_H(Game_screen_mode) - h, w, SM_H(Game_screen_mode));
 
-			game_init_render_sub_buffers( x, y, w, h );
+			game_init_render_sub_buffers(x, y, w, h);
 			break;
 		}
         case CM_MODEL_3D:
@@ -342,8 +347,8 @@ void init_cockpit()
 //selects a given cockpit (or lack of one).  See types in game.h
 void select_cockpit(int mode)
 {
-	if (mode != PlayerCfg.CockpitMode[1]) {		//new mode
-		PlayerCfg.CockpitMode[1]=mode;
+	if (mode != PlayerCfg.CurrentCockpitMode) {		//new mode
+		PlayerCfg.CurrentCockpitMode = mode;
 		init_cockpit();
 	}
 }
@@ -431,16 +436,44 @@ int set_screen_mode(int sm)
 
 static int time_paused=0;
 
+// Single source of truth for "should palette flash effects be damped?".
+//
+// Before this existed the rule was spread over six call sites as
+// "!(Game_mode & GM_MULTI) || !Netgame.ReducedFlash", which only ever meant
+// "the host asked for it in this netgame" -- single player was hard-wired to
+// full-strength flash and the player had no say at all.
+//
+// The rule now mirrors how custom models and textures work:
+//   single player : GameCfg.ReducedFlash alone decides
+//   multiplayer   : the player's own setting must be on AND the netgame must
+//                   allow it, so a host can force calm flash on everyone
+//
+// "Off" in the graphics menu therefore means off in both modes, and "on" in a
+// multiplayer game means the host's netgame flag is what settles it.
+int reduced_flash_wanted(void)
+{
+	if (GameCfg.ReducedFlash)
+	{
+		if (!(Game_mode & GM_MULTI))
+			return 1;
+		return Netgame.ReducedFlash != 0;
+	}
+	return 0;
+}
+
+// Exposed so the speedrun timers (gameseq.c) can tell whether gameplay is
+// frozen. IGT stops while this is non-zero; RTA continues through a pause.
+int game_time_is_paused(void)
+{
+	return time_paused != 0;
+}
+
 void stop_time()
 {
 	if (time_paused==0) {
 		fix64 time;
 		timer_update();
 		time = timer_query();
-		last_timer_value = time - last_timer_value;
-		if (last_timer_value < 0) {
-			last_timer_value = 0;
-		}
 	}
 	time_paused++;
 }
@@ -453,7 +486,6 @@ void start_time()
 		fix64 time;
 		timer_update();
 		time = timer_query();
-		last_timer_value = time - last_timer_value;
 	}
 }
 
@@ -488,53 +520,219 @@ void calc_d_tick()
 	}
 }
 
+// The engine's fix type has only 1/65536s of resolution, which is not enough
+// to represent an arbitrary period: 65536/167 = 392.43 ticks, and integer
+// division truncates to 392, making the period too SHORT and the resulting
+// framerate too HIGH (~167.2 instead of 167). Rounding cannot fix this either,
+// because 392.43 simply has no exact representation in whole ticks.
+//
+// So the period (and the deadline accumulator) are carried in a finer unit --
+// F1_0 scaled left by FPS_PERIOD_EXTRA_BITS -- which reduces the representation
+// error to well under a microsecond. Downstream FrameTime is shifted back down
+// to ordinary fix units, so nothing outside this function changes.
+#define FPS_PERIOD_EXTRA_BITS 16
+#define FPS_PERIOD_SCALE ((fix64)1 << FPS_PERIOD_EXTRA_BITS)
+
+// Absolute deadline for the next frame, in FPS_PERIOD_SCALE'd
+// timer_query_perf() units.
+//
+// This is a persistent ACCUMULATOR, not a per-frame value. It must survive
+// across calls so that the work done by GameProcessFrame()/game_render_frame()
+// is subtracted from the next frame's wait. Recomputing `deadline = now +
+// period` every frame silently adds the render time to every frame period,
+// because the render happens AFTER calc_frame_time() returns. That produced a
+// constant ~0.86ms per frame -- e.g. a 167 cap yielding 146fps (1/167=5.99ms
+// + 0.86ms = 6.85ms = 1/146).
+//
+// Zero means "not yet initialised"; reset_time() clears it.
+static fix64 frame_deadline = 0;
+
+// Timestamp (in FPS_PERIOD_SCALE'd perf units) at which the previous frame
+// began. Kept so FrameTime can measure the FULL frame-to-frame interval --
+// which necessarily includes the sim + render work that runs AFTER
+// calc_frame_time() returns, since the next call happens after all of it.
+static fix64 prev_perf_start = 0;
+
 void reset_time()
 {
 	timer_update();
 	last_timer_value = timer_query();
+	frame_deadline = 0;
+	prev_perf_start = 0;
+}
+
+// Frame cap for menus and in-game screens. Over a running multiplayer game they add no cap of their own:
+// the game window behind them paces itself (-maxfps), so the host keeps relaying packets at its normal
+// rate and observers keep smooth timing
+void menu_frame_delay(void)
+{
+	if ((Game_mode & GM_MULTI) && Game_wind && window_is_visible(Game_wind) && Network_status == NETSTAT_PLAYING)
+		return;
+	timer_delay2(100);
 }
 
 void calc_frame_time()
 {
-	fix64 timer_value;
 	fix last_frametime = FrameTime;
+	int maxfps;
+	fix64 period, deadline, remaining;
+	fix64 perf_start;
 
-	timer_update();
-	timer_value = timer_query();
-	FrameTime = timer_value - last_timer_value;
+	// Framerate pacing.
+	//
+	// VSync is only consulted when the backend can actually control it
+	// (gr_vsync_supported()). On backends that cannot -- such as SDL 1.2, which
+	// has no vsync API at all -- GameCfg.VSync is ignored outright and the user's
+	// Framerate value always wins. That matters because the old code applied
+	// `GameCfg.VSync ? MAXIMUM_FPS : PlayerCfg.maxFps` unconditionally, so a
+	// checkbox that could not reach the driver still silently overrode the chosen
+	// frame rate and could be used to push past the configured cap.
+	//
+	// When vsync IS controllable and switched on, the driver leads: it paces
+	// presentation at the panel's rate. The app then does not compete by pacing
+	// to a lower figure (which would halve the rate), but MAXIMUM_FPS is still
+	// applied as a hard ceiling so the frame rate can never exceed it.
+	//
+	// Driver-level vsync may also be applied with no in-game setting at all;
+	// that is unaffected by anything here.
+	maxfps = (gr_vsync_supported() && GameCfg.VSync)
+		? MAXIMUM_FPS
+		: PlayerCfg.maxFps;
 
-	while (
-#ifdef RT_DX12
-        // Skip the limiter only while SteamVR's WaitGetPoses is actually blocking.
-        // If it fails (e.g. another VR app has focus) the loop would otherwise
-        // run uncapped, which Descent's physics and AI do not tolerate.
-        !RT_VRCompositorPaced() &&
-#endif
-        FrameTime < f1_0 / (GameCfg.VSync?MAXIMUM_FPS:PlayerCfg.maxFps))
+	if (maxfps < MIN_FRAMERATE_CAP || maxfps > MAXIMUM_FPS)
+		maxfps = MAXIMUM_FPS;
+
+	// Compute the period in the finer scaled unit so that e.g. a 167 cap
+	// yields exactly 167 rather than 167.2 (see FPS_PERIOD_EXTRA_BITS above).
+	period = ((fix64)f1_0 * FPS_PERIOD_SCALE) / maxfps;
+
+	perf_start = timer_query_perf() * FPS_PERIOD_SCALE;
+
+	// FrameTime spans from the START of the previous frame to the start of this
+	// one, so it covers everything: sim, render, event handling and the wait.
+	// Because it is wall-clock, game speed is independent of the FPS cap -- the
+	// cap only decides how OFTEN that wall-clock slice is sampled.
+	if (prev_perf_start)
+		FrameTime = (perf_start - prev_perf_start) >> FPS_PERIOD_EXTRA_BITS;
+	else
+		FrameTime = period >> FPS_PERIOD_EXTRA_BITS;	// first frame
+
+	prev_perf_start = perf_start;
+
+	// Pace against an absolute deadline on a high resolution clock
+	// (timer_query_perf), not the ~1ms granular game clock.
+	//
+	// This runs every frame. It is what enforces the Framerate value: the loop
+	// is paced against a deadline derived from it, so the cap actually reads
+	// true.
+	// It was previously skipped when vsync was enabled, on the assumption the
+	// display refresh would pace the loop -- but the SDL surface is created with
+	// SDL_SWSURFACE (see gr.c), a software surface with NO hardware vsync, and
+	// SDL_Flip() on such a surface returns immediately. With the pacing skipped,
+	// enabling vsync actually REMOVED all frame limiting and the game ran
+	// unthrottled (observed at ~215fps), exceeding both the panel rate and the
+	// cap.
+	//
+	// Sleep for most of the remaining budget, then spin the last ~1ms so we land
+	// on the deadline instead of letting SDL_Delay quantisation push us past it.
+	//
+	// Advance the accumulator by exactly one period. Because it carries over
+	// from the previous frame, any work already done this frame (sim + render)
+	// is absorbed into the remaining wait instead of being added on top of it.
+	// This is what makes the cap actually read true.
+	//
+	// If we are hopelessly behind (e.g. a long stall), resync rather than
+	// sprinting to catch up.
+	// Pace against an absolute deadline on a high resolution clock
+	// (timer_query_perf), not the ~1ms granular game clock.
+	//
+	// This runs every frame. It is what enforces the Framerate value: the loop
+	// is paced against a deadline derived from it, so the cap actually reads
+	// true.
+	//
+	// It is not skipped when vsync is enabled, on the assumption the display
+	// refresh would pace the loop. The SDL surface is created with SDL_SWSURFACE
+	// (see gr.c), a software surface with no hardware vsync, and SDL_Flip() on
+	// such a surface returns immediately. With the pacing skipped, enabling
+	// vsync would REMOVE all frame limiting and the game would run unthrottled
+	// (~215fps observed on SDL 1.2), exceeding both the panel rate and the cap.
+	//
+	// Sleep for most of the remaining budget, then spin the last ~1ms so we land
+	// on the deadline instead of letting SDL_Delay quantisation push us past it.
+	//
+	// Advance the accumulator by exactly one period. Because it carries over
+	// from the previous frame, any work already done this frame (sim + render)
+	// is absorbed into the remaining wait instead of being added on top of it.
+	// This is what makes the cap actually read true.
+	//
+	// If we are hopelessly behind (e.g. a long stall), resync rather than
+	// sprinting to catch up.
 	{
-		if (GameArg.SysUseNiceFPS && !GameCfg.VSync)
-			timer_delay(f1_0 / PlayerCfg.maxFps - FrameTime);
-		timer_update();
-		timer_value = timer_query();
-		FrameTime = timer_value - last_timer_value;
+		if (!frame_deadline || frame_deadline < perf_start - period)
+			frame_deadline = perf_start;
+		frame_deadline += period;
+
+		deadline = frame_deadline;
+
+		for (;;)
+		{
+			int sleep_ms;
+
+#ifdef RT_DX12
+			// SteamVR's WaitGetPoses already paces the frame while it is blocking.
+			if (RT_VRCompositorPaced())
+				break;
+#endif
+
+			remaining = deadline - (timer_query_perf() * FPS_PERIOD_SCALE);
+			if (remaining <= 0)
+				break;
+
+			if (GameArg.SysUseNiceFPS)
+			{
+				// Work in unscaled units to decide how long to sleep.
+				fix64 remaining_fix = remaining >> FPS_PERIOD_EXTRA_BITS;
+
+				// Leave a ~1ms tail to spin through.
+				sleep_ms = f2i(fixmul(remaining_fix, i2f(1000))) - 1;
+				if (sleep_ms > 0)
+				{
+					timer_delay_ms(sleep_ms);
+					continue;
+				}
+			}
+
+			// Either nicefps is off (-nonicefps), or we are inside the
+			// sub-millisecond tail: busy-poll to the deadline.
+		}
 	}
+
+	// Keep the coarse game clock in step with the frame just consumed, so
+	// reset_time() and the ~1ms-granular consumers of timer_query() (AI,
+	// netplay ping, menus) keep advancing correctly.
+	timer_update();
+	last_timer_value = timer_query();
 
 	if ( cheats.turbo )
 		FrameTime *= 2;
 
-	last_timer_value = timer_value;
+	// Guard against zero/negative: physics divides by FrameTime and controls.c asserts it
+	// is strictly positive. VR compositor pacing can also give two samples one timer tick.
+	if (FrameTime < 1)
+		FrameTime = (last_frametime > 1 ? last_frametime : f1_0 / 60);
 
-    // VR is paced by the compositor, so two simulation samples can share a
-    // timer tick (especially just after loading). AI and physics divide by this
-    // value. Reuse a valid previous step or a modest initial step, never zero.
-    if (FrameTime <= 0)
-        FrameTime = last_frametime > 0 ? last_frametime : f1_0 / 60;
-
+}
+void calc_game_time()
+{
 	GameTime64 += FrameTime;
 
 	// CED -- Something's busted with the D2 code.  Here's D1.
-	fix D1_MIN_TRACKABLE = (3 * F1_0) / 4; 
-	Min_trackable_dot = 3*(F1_0 - D1_MIN_TRACKABLE)/4 + D1_MIN_TRACKABLE;
+	// With "Original D1 Weapons" the value set by set_homing_update_rate() is left alone: it already
+	// follows D1's formula, including the Homing rate.
+	if (!using_original_d1_weapons()) {
+		fix D1_MIN_TRACKABLE = (3 * F1_0) / 4;
+		Min_trackable_dot = 3*(F1_0 - D1_MIN_TRACKABLE)/4 + D1_MIN_TRACKABLE;
+	}
 
 
 	calc_d_tick();
@@ -619,7 +817,7 @@ void do_cloak_stuff(void)
 {
 	int i;
 
-	for (i = 0; i < N_players; i++)
+	for (i = (Netgame.host_is_obs ? 1 : 0); i < N_players; i++)
 		if (Players[i].flags & PLAYER_FLAGS_CLOAKED) {
 			if (GameTime64 > Players[i].cloak_time+CLOAK_TIME_MAX)
 			{
@@ -628,7 +826,10 @@ void do_cloak_stuff(void)
 					digi_play_sample( SOUND_CLOAK_OFF, F1_0);
 #ifdef NETWORK
 					if (Game_mode & GM_MULTI)
+					{
 						multi_send_play_sound(SOUND_CLOAK_OFF, F1_0);
+						multi_send_ship_status();
+					}
 					maybe_drop_net_powerup(POW_CLOAK);
 					if ( Newdemo_state != ND_STATE_PLAYBACK )
 						multi_send_decloak(); // For demo recording
@@ -655,6 +856,7 @@ void do_invulnerable_stuff(void)
 				{
 					multi_send_play_sound(SOUND_INVULNERABILITY_OFF, F1_0);
 					maybe_drop_net_powerup(POW_INVULNERABILITY);
+					multi_send_ship_status();
 				}
 				#endif
 			}
@@ -680,8 +882,18 @@ void do_afterburner_stuff(void)
 {
 	static sbyte func_play = 0;
 
+	/* Demo playback replays the recorded sound-link and sound-kill events.
+	 * Do not generate additional afterburner sounds from live controls here. */
+	if (Newdemo_state == ND_STATE_PLAYBACK) {
+		Last_afterburner_state = Controls.afterburner_state;
+		Last_afterburner_charge = Players[Player_num].afterburner_charge;
+		return;
+	}
+
 	if (!(Players[Player_num].flags & PLAYER_FLAGS_AFTERBURNER))
-		Afterburner_charge = 0;
+		Players[Player_num].afterburner_charge = 0;
+	if (Newdemo_state == ND_STATE_RECORDING)
+		newdemo_record_player_afterburner_state(Controls.afterburner_state);
 
 	if (Endlevel_sequence || Player_is_dead)
 	{
@@ -695,9 +907,9 @@ void do_afterburner_stuff(void)
 #endif
 	}
 
-	if ((Controls.afterburner_state != Last_afterburner_state && Last_afterburner_charge) || (Last_afterburner_state && Last_afterburner_charge && !Afterburner_charge)) {
+	if ((Controls.afterburner_state != Last_afterburner_state && Last_afterburner_charge) || (Last_afterburner_state && Last_afterburner_charge && !Players[Player_num].afterburner_charge)) {
 
-		if (Afterburner_charge && Controls.afterburner_state && (Players[Player_num].flags & PLAYER_FLAGS_AFTERBURNER)) {
+		if (Players[Player_num].afterburner_charge && Controls.afterburner_state && (Players[Player_num].flags & PLAYER_FLAGS_AFTERBURNER)) {
 			digi_link_sound_to_object3( SOUND_AFTERBURNER_IGNITE, Players[Player_num].objnum, 1, F1_0, i2f(256), AFTERBURNER_LOOP_START, AFTERBURNER_LOOP_END );
 #ifdef NETWORK
 			if (Game_mode & GM_MULTI)
@@ -723,7 +935,7 @@ void do_afterburner_stuff(void)
 	//@@	afterburner_shake();
 
 	Last_afterburner_state = Controls.afterburner_state;
-	Last_afterburner_charge = Afterburner_charge;
+	Last_afterburner_charge = Players[Player_num].afterburner_charge;
 }
 
 // -- //	------------------------------------------------------------------------------------
@@ -783,14 +995,15 @@ fix64	Time_flash_last_played;
 void diminish_palette_towards_normal(void)
 {
 	int	dec_amount = 0;
+	int	diminish_rate = !reduced_flash_wanted() ? DIMINISH_RATE : (DIMINISH_RATE * 20);
 
 	//	Diminish at DIMINISH_RATE units/second.
 	//	For frame rates > DIMINISH_RATE Hz, use randomness to achieve this.
-	if (FrameTime < F1_0/DIMINISH_RATE) {
-		if (d_rand() < FrameTime*DIMINISH_RATE/2)	//	Note: d_rand() is in 0..32767, and 8 Hz means decrement every frame
+	if (FrameTime < F1_0/diminish_rate) {
+		if (d_rand() < FrameTime*diminish_rate/2)	//	Note: d_rand() is in 0..32767, and 8 Hz means decrement every frame
 			dec_amount = 1;
 	} else {
-		dec_amount = f2i(FrameTime*DIMINISH_RATE);	// one second = DIMINISH_RATE counts
+		dec_amount = f2i(FrameTime*diminish_rate);	// one second = DIMINISH_RATE counts
 		if (dec_amount == 0)
 			dec_amount++;				// make sure we decrement by something
 	}
@@ -865,6 +1078,10 @@ int allowed_to_fire_laser(void)
 		return 0;
 	}
 
+	if (is_observer()) {
+		return 0;
+	}
+
 	//	Make sure enough time has elapsed to fire laser
 	if (Next_laser_fire_time > GameTime64)
 		return 0;
@@ -874,8 +1091,15 @@ int allowed_to_fire_laser(void)
 
 int allowed_to_fire_flare(void)
 {
+	if (Player_is_dead)
+		return 0;
+
 	if (Next_flare_fire_time > GameTime64)
 		return 0;
+
+	if (is_observer()) {
+		return 0;
+	}
 
 	if (Players[Player_num].energy >= Weapon_info[FLARE_ID].energy_usage)
 		Next_flare_fire_time = GameTime64 + F1_0/4;
@@ -890,6 +1114,10 @@ int allowed_to_fire_missile(void)
 	//	Make sure enough time has elapsed to fire missile
 	if (Next_missile_fire_time > GameTime64)
 		return 0;
+
+	if (is_observer()) {
+		return 0;
+	}
 
 	return 1;
 }
@@ -981,36 +1209,52 @@ void show_netgame_help()
 	int nitems = 0;
 	newmenu_item *m;
 
-	MALLOC(m, newmenu_item, 18);
+	MALLOC(m, newmenu_item, 19);
 	if (!m)
 		return;
 
 	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "F1\t  THIS SCREEN";
-	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "ALT-0\t  DROP FLAG";
+	if (!is_observer()) {
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "ALT-0\t  DROP FLAG";
 #if !(defined(__APPLE__) || defined(macintosh))
-	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "Alt-F2/F3\t  SAVE/LOAD COOP GAME";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "Alt-F2/F3\t  SAVE/LOAD COOP GAME";
 #else
-	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "Alt-F2/F3 (\x85-SHIFT-s/\x85-o)\t  SAVE/LOAD COOP GAME";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "Alt-F2/F3 (\x85-SHIFT-s/\x85-o)\t  SAVE/LOAD COOP GAME";
 #endif
+	}
 	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "ALT-F4\t  SHOW PLAYER NAMES ON HUD";
 	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "F6\t  TOGGLE CONNECTION STATS";	
 	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "F7\t  TOGGLE KILL LIST";
-	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "F8\t  SEND MESSAGE";
-	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "(SHIFT-)F9 to F12\t  (DEFINE)SEND MACRO";
+	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "ALT-F7\t  SWITCH HUD MODES";
+	if (!is_observer()) {
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "F8\t  SEND MESSAGE";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "(SHIFT-)F9 to F12\t  (DEFINE)SEND MACRO";
+	}
 	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "PAUSE\t  SHOW NETGAME INFORMATION";
 
 #if (defined(__APPLE__) || defined(macintosh))
 	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "";
 	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "(Use \x85-# for F#. e.g. \x85-1 for F1)";
 #endif
-
-	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "";
-	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "MULTIPLAYER MESSAGE COMMANDS:";
-	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "(*): TEXT\t  SEND TEXT TO PLAYER/TEAM (*)";
-	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "/Handicap: (*)\t  SET YOUR STARTING SHIELDS TO (*) [10-100]";
-	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "/move: (*)\t  MOVE PLAYER (*) TO OTHER TEAM (Host-only)";
-	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "/kick: (*)\t  KICK PLAYER (*) FROM GAME (Host-only)";
-	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "/KillReactor\t  BLOW UP THE MINE (Host-only)";
+	if (is_observer()) {
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "OBSERVERS:";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "CTRL+1 to CTRL+7\t  OBSERVE SPECIFIC PLAYER";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "CTRL+8\t  FLY FREELY";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "CTRL+9/0\t  OBSERVE PREVIOUS/NEXT PLAYER";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "CTRL+MINUS\t  OBSERVE PLAYER IN FIRST PERSON";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "CTRL+EQUALS\t  OBSERVE PLAYER IN THIRD PERSON";
+	}
+	else {
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "MULTIPLAYER MESSAGE COMMANDS:";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "(*): TEXT\t  SEND TEXT TO PLAYER/TEAM (*)";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "/Handicap: (*)\t  SET YOUR STARTING SHIELDS TO (*) [10-100]";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "/move: (*)\t  MOVE PLAYER (*) TO OTHER TEAM (Host-only)";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "/kick: (*)\t  KICK PLAYER (*) FROM GAME (Host-only)";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "/KillReactor\t  BLOW UP THE MINE (Host-only)";
+		m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "/noobs\t  KICK OBSERVERS (Host-only)";
+	}
 
 	newmenu_dotiny( NULL, TXT_KEYS, nitems, m, 0, free_help, NULL );
 }
@@ -1020,7 +1264,7 @@ void show_newdemo_help()
 	newmenu_item *m;
 	int nitems = 0;
 
-	MALLOC(m, newmenu_item, 15);
+	MALLOC(m, newmenu_item, 16);
 	if (!m)
 		return;
 
@@ -1028,6 +1272,7 @@ void show_newdemo_help()
 	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "F1\t  THIS SCREEN";
 	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = TXT_HELP_F2;
 	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "F3\t  SWITCH COCKPIT MODES";
+	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "ALT-F7\t  SWITCH HUD MODES";
 	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "F4\t  TOGGLE PERCENTAGE DISPLAY";
 	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "UP\t  PLAY";
 	m[nitems].type = NM_TYPE_TEXT; m[nitems++].text = "DOWN\t  PAUSE";
@@ -1064,8 +1309,8 @@ void check_rear_view()
 
 		if (Rear_view) {
 			Rear_view = 0;
-			if (PlayerCfg.CockpitMode[1]==CM_REAR_VIEW) {
-				select_cockpit(PlayerCfg.CockpitMode[0]);
+			if (PlayerCfg.CurrentCockpitMode==CM_REAR_VIEW) {
+				select_cockpit(PlayerCfg.PreferredCockpitMode);
 			}
 			if (Newdemo_state == ND_STATE_RECORDING)
 				newdemo_record_restore_rearview();
@@ -1074,7 +1319,7 @@ void check_rear_view()
 			Rear_view = 1;
 			leave_mode = 0;		//means wait for another key
 			entry_time = timer_query();
-			if (PlayerCfg.CockpitMode[1] == CM_FULL_COCKPIT) {
+			if (PlayerCfg.CurrentCockpitMode == CM_FULL_COCKPIT) {
 				select_cockpit(CM_REAR_VIEW);
 			}
 			if (Newdemo_state == ND_STATE_RECORDING)
@@ -1094,8 +1339,8 @@ void check_rear_view()
 		{
 			if (leave_mode==1 && Rear_view) {
 				Rear_view = 0;
-				if (PlayerCfg.CockpitMode[1]==CM_REAR_VIEW) {
-					select_cockpit(PlayerCfg.CockpitMode[0]);
+				if (PlayerCfg.CurrentCockpitMode==CM_REAR_VIEW) {
+					select_cockpit(PlayerCfg.PreferredCockpitMode);
 				}
 				if (Newdemo_state == ND_STATE_RECORDING)
 					newdemo_record_restore_rearview();
@@ -1111,7 +1356,7 @@ void reset_rear_view(void)
 	}
 
 	Rear_view = 0;
-	select_cockpit(PlayerCfg.CockpitMode[0]);
+	select_cockpit(PlayerCfg.PreferredCockpitMode);
 }
 
 int Config_menu_flag;
@@ -1135,7 +1380,7 @@ window *game_setup(void)
 {
 	window *game_wind;
 
-	PlayerCfg.CockpitMode[1] = PlayerCfg.CockpitMode[0];
+	PlayerCfg.CurrentCockpitMode = PlayerCfg.PreferredCockpitMode;
 	last_drawn_cockpit = -1;	// Force cockpit to redraw next time a frame renders.
 	Endlevel_sequence = 0;
 
@@ -1242,12 +1487,22 @@ int game_handler(window *wind, d_event *event, void *data)
 			return ReadControls(event);
 
 		case EVENT_WINDOW_DRAW:
+			calc_frame_time();
+
+			// Speedrun clocks are sampled OUTSIDE the time_paused guard. Their
+			// independent gates make IGT count only during gameplay and RTA count
+			// gameplay plus marked transitions, including load delays. Neither clock
+			// includes the Escape pause screen while the run remains active.
+			speedrun_tick();
+
 			if (!time_paused)
 			{
-				calc_frame_time();
+				calc_game_time();
 				GameProcessFrame();
 			}
 
+			// After this frame's network and object updates, so the camera and the observed ship share one position
+			observer_camera_update();
 #ifdef RT_DX12
 			RT_BeginFrame();
 			RT_StartImGuiFrame();
@@ -1277,7 +1532,7 @@ int game_handler(window *wind, d_event *event, void *data)
 				RT_DisableFreeCam();
 #endif
 			if ( (Newdemo_state == ND_STATE_RECORDING) || (Newdemo_state == ND_STATE_PAUSED) )
-				newdemo_stop_recording();
+				newdemo_stop_recording(0);
 
 #ifdef NETWORK
 			multi_leave_game();
@@ -1290,6 +1545,8 @@ int game_handler(window *wind, d_event *event, void *data)
 
 			game_disable_cheats();
 			Game_mode = GM_GAME_OVER;
+			if (GameArg.GameLogSplit)
+				con_switch_log(NULL); // switch back to default log
 #ifdef EDITOR
 			if (!EditorWindow)		// have to do it this way because of the necessary longjmp. Yuck.
 #endif
@@ -1402,6 +1659,12 @@ void GameProcessFrame(void)
 	fix player_shields = Players[Player_num].shields;
 	int player_was_dead = Player_is_dead;
 
+#ifdef NETWORK
+	// The host's Change Map, received from the network: start the new level here, at the top of a frame,
+	// and end this frame so nothing in it touches the old or half-loaded level
+	if ((Game_mode & GM_MULTI) && multi_change_map_frame())
+		return;
+#endif
 #ifdef RT_DX12
 	if (g_rt_free_cam_info.g_free_cam_enabled) {
 		object_move_one(&Objects[g_rt_free_cam_info.g_free_cam_obj]);
@@ -1510,6 +1773,11 @@ void GameProcessFrame(void)
 		Players[Player_num].homing_object_dist = -1;		//	Assume not being tracked.  Laser_do_weapon_sequence modifies this.
 
 		object_move_all();
+#ifdef NETWORK
+		// Physics just moved remote ships on by their last packet's velocity; put them back on the smoothed position
+		if (Game_mode & GM_MULTI)
+			multi_interp_update_remote();
+#endif
 		powerup_grab_cheat_all();
 
 		if (Endlevel_sequence)	//might have been started during move
@@ -1523,7 +1791,7 @@ void GameProcessFrame(void)
 			FireLaser();				// Fire Laser!
 
 		if (Auto_fire_fusion_cannon_time) {
-			if (Primary_weapon != FUSION_INDEX)
+			if (Players[Player_num].primary_weapon != FUSION_INDEX)
 				Auto_fire_fusion_cannon_time = 0;
 			else if (GameTime64 + FrameTime/2 >= Auto_fire_fusion_cannon_time) {
 				Auto_fire_fusion_cannon_time = 0;
@@ -1553,14 +1821,12 @@ void GameProcessFrame(void)
 		}
 
 		if (Global_laser_firing_count)
-			Global_laser_firing_count -= do_laser_firing_player();
-
-		if (Global_laser_firing_count < 0)
-			Global_laser_firing_count = 0;
+			do_laser_firing_player();
 
 		delayed_autoselect(); /* SelectAfterFire */ 
 		do_shield_warnings(); 
 
+		check_robot_respawns();
 	}
 
 	if (Do_appearance_effect) {
@@ -1827,13 +2093,14 @@ int add_flicker(int segnum, int sidenum, fix delay, unsigned long mask)
 void FireLaser()
 {
 
-	Global_laser_firing_count = Controls.fire_primary_state?Weapon_info[Primary_weapon_to_weapon_info[Primary_weapon]].fire_count:0;
+	Global_laser_firing_count = Controls.fire_primary_state?Weapon_info[Primary_weapon_to_weapon_info[Players[Player_num].primary_weapon]].fire_count:0;
 
-	if ((Primary_weapon == FUSION_INDEX) && (Global_laser_firing_count)) {
+	if ((Players[Player_num].primary_weapon == FUSION_INDEX) && (Global_laser_firing_count)) {
 		if ((Players[Player_num].energy < F1_0*2) && (Auto_fire_fusion_cannon_time == 0)) {
 			Global_laser_firing_count = 0;
 		} else {
 			static fix64 Fusion_next_sound_time = 0;
+			int flash_val;
 
 			if (Fusion_charge == 0)
 				Players[Player_num].energy -= F1_0*2;
@@ -1847,10 +2114,12 @@ void FireLaser()
 			} else
 				Auto_fire_fusion_cannon_time = GameTime64 + FrameTime/2 + 1;		//	Fire the fusion cannon at this time in the future.
 
+			flash_val = !reduced_flash_wanted() ? Fusion_charge >> 11 :
+				PaletteRedAdd < 10 ? 10 - PaletteRedAdd : 0;
 			if (Fusion_charge < F1_0*2)
-				PALETTE_FLASH_ADD(Fusion_charge >> 11, 0, Fusion_charge >> 11);
+				PALETTE_FLASH_ADD(flash_val, 0, flash_val);
 			else
-				PALETTE_FLASH_ADD(Fusion_charge >> 11, Fusion_charge >> 11, 0);
+				PALETTE_FLASH_ADD(flash_val, flash_val, 0);
 
 			if (Fusion_next_sound_time > GameTime64 + F1_0/8 + D_RAND_MAX/4) // GameTime64 is smaller than max delay - player in new level?
 				Fusion_next_sound_time = GameTime64 - 1;
@@ -1863,7 +2132,9 @@ void FireLaser()
 					#ifdef NETWORK
 					if(Game_mode & GM_MULTI) {
 						multi_send_play_sound(11, F1_0);
-						con_printf(CON_NORMAL, "You took %0.1f damage from overcharging fusion!\n", (double)(damage)/(double)(F1_0)); 
+						con_printf(CON_NORMAL, "You took %.1f damage from overcharging fusion, shields now %.1f\n", f2fl(damage), f2fl(Players[Player_num].shields - damage));
+
+						multi_send_damage(damage, Players[Player_num].shields, OBJ_PLAYER, Player_num, DAMAGE_OVERCHARGE, NULL);
 					}
 					#endif
 					
@@ -1878,6 +2149,9 @@ void FireLaser()
 				}
 				Fusion_next_sound_time = GameTime64 + F1_0/8 + d_rand()/4;
 			}
+
+			if (Game_mode & GM_MULTI)
+				multi_send_ship_status();
 		}
 	}
 }
@@ -2044,4 +2318,28 @@ void flickering_light_write(flickering_light *fl, PHYSFS_file *fp)
 	PHYSFS_writeULE32(fp, fl->mask);
 	PHYSFSX_writeFix(fp, fl->timer);
 	PHYSFSX_writeFix(fp, fl->delay);
+}
+
+bool is_observer() {
+	return (Game_mode & GM_OBSERVER) != 0;
+}
+
+object* get_player_view_object()
+{
+	// If we're observing a player, ConsoleObject may not actually be their location if we're in chase cam.
+	// But we still want to show extra views from their real location, so correct it
+	if (is_observer() && is_observing_player())
+		return &Objects[Players[Current_obs_player].objnum];
+	else
+		return ConsoleObject;
+}
+
+bool can_draw_observer_cockpit()
+{
+	// The result of this function is meaningful only in observer mode.
+	Assert(is_observer());
+
+	// We can only draw a cockpit in observer mode if the relevant setting is enabled, and we're
+	// observing in first-person mode.
+	return PlayerCfg.ObsShowCockpit[get_observer_game_mode()] && is_observing_player() && !Obs_at_distance;
 }

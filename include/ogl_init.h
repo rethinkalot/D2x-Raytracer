@@ -11,6 +11,9 @@
 #include <stddef.h>
 #endif
 
+#ifndef RT_DX12 // D2s uses GLEW; the raytracer build has no OpenGL loader
+#include <GL/glew.h>
+#endif
 #ifdef _WIN32
 #include "loadgl.h"
 int ogl_init_load_library(void);
@@ -62,6 +65,7 @@ typedef struct _ogl_texture {
 	GLfloat prio;
 	int wrapstate;
 	unsigned long numrend;
+	int is_png;
 } ogl_texture;
 
 extern ogl_texture* ogl_get_free_texture();
@@ -84,7 +88,9 @@ int ogl_init_window(int x, int y);//create a window/switch modes/etc
 #define OGL_FLAG_MIPMAP (1 << 0)
 #define OGL_FLAG_NOCOLOR (1 << 1)
 #define OGL_FLAG_ALPHA (1 << 31) // not required for ogl_loadbmtexture, since it uses the BM_FLAG_TRANSPARENT, but is needed for ogl_init_texture.
-void ogl_loadbmtexture_f(grs_bitmap *bm, int texfilt);
+void ogl_loadbmtexture_f(grs_bitmap *bm, int texfilt, const char *bitmapname);
+// Uploads bm_w x bm_h RGB pixels (3 bytes each) as bm's texture, with no palette involved
+void ogl_loadrgbtexture(grs_bitmap *bm, unsigned char *rgb, int texfilt);
 void ogl_freebmtexture(grs_bitmap *bm);
 
 void ogl_start_frame(void);
@@ -92,6 +98,10 @@ void ogl_end_frame(void);
 void ogl_swap_buffers_internal(void);
 void ogl_set_screen_mode(void);
 void ogl_cache_level_textures(void);
+// Drops only the PNG (custom texture) entries and lets them reload lazily as
+// they are drawn. Much cheaper than ogl_cache_level_textures() for toggling the
+// Custom Textures option mid-game.
+void ogl_recache_custom_textures(void);
 
 void ogl_urect(int left, int top, int right, int bot);
 bool ogl_ubitmapm_cs(int x, int y,int dw, int dh, grs_bitmap *bm,int c, int scale);
@@ -106,6 +116,7 @@ bool g3_draw_tmap_2(int nv,const g3s_point **pointlist,g3s_uvl *uvl_list,g3s_lrg
 
 void ogl_draw_vertex_reticle(int cross,int primary,int secondary,int color,int alpha,int size_offs);
 void ogl_toggle_depth_test(int enable);
+void ogl_enable_textures(void);
 void ogl_set_blending();
 int pow2ize(int x);//from ogl.c
 

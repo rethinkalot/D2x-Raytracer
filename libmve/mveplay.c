@@ -18,13 +18,9 @@
 # endif // macintosh
 #endif // _WIN32
 
-#include <SDL/SDL.h>
+#include <SDL.h>
 #ifdef USE_SDLMIXER
-#if !(defined(__APPLE__) && defined(__MACH__))
-#include <SDL/SDL_mixer.h>
-#else
-#include <SDL_mixer/SDL_mixer.h>
-#endif
+#include <SDL_mixer.h>
 #endif
 
 #include "digi.h"
@@ -489,7 +485,7 @@ static int audio_data_handler(unsigned char major, unsigned char minor, unsigned
 				// copy back to the audio buffer
 				mve_free(mve_audio_buffers[mve_audio_buftail]); // free the old audio buffer
 				mve_audio_buflens[mve_audio_buftail] = cvt.len_cvt;
-				mve_audio_buffers[mve_audio_buftail] = cvt.buf;
+				mve_audio_buffers[mve_audio_buftail] = (short *)cvt.buf;
 			}
 #endif
 

@@ -243,7 +243,7 @@ void init_ai_frame(void)
 
 	Dist_to_last_fired_upon_player_pos = vm_vec_dist_quick(&Last_fired_upon_player_pos, &Believed_player_pos);
 
-	ab_state = Afterburner_charge && Controls.afterburner_state && (Players[Player_num].flags & PLAYER_FLAGS_AFTERBURNER);
+	ab_state = Players[Player_num].afterburner_charge && Controls.afterburner_state && (Players[Player_num].flags & PLAYER_FLAGS_AFTERBURNER);
 
 	if (!(Players[Player_num].flags & PLAYER_FLAGS_CLOAKED) || (Players[Player_num].flags & PLAYER_FLAGS_HEADLIGHT_ON) || ab_state) {
 		ai_do_cloak_stuff();
@@ -323,6 +323,13 @@ void do_ai_frame(object *obj)
 			if (!aip->SKIP_AI_COUNT)
 				obj->mtype.phys_info.flags &= ~PF_USES_THRUST;
 		}
+		return;
+	}
+
+	// Robots do nothing for observers; those controlling them handle their actions.
+	// The death roll is local on every screen though, so an observer still plays it and the robot explodes.
+	if (is_observer()) {
+		do_any_robot_dying_frame(obj);
 		return;
 	}
 
@@ -780,7 +787,13 @@ _exit_cheat:
 	if (robptr->thief) {
 
 		compute_vis_and_vec(obj, &vis_vec_pos, ailp, &vec_to_player, &player_visibility, robptr, &visibility_and_vec_computed);
-		do_thief_frame(obj, dist_to_player, player_visibility, &vec_to_player);
+		// Only the owner moves the Thief (claiming it if free) and sends its position; every other copy
+		// follows those packets. Each copy used to chase its own player, so the Thief differed per
+		// screen and jumped whenever the owner's position arrived. Single player: always 1.
+		if (ai_multiplayer_awareness(obj, 75)) {
+			do_thief_frame(obj, dist_to_player, player_visibility, &vec_to_player);
+			ai_multi_send_robot_position(objnum, -1);
+		}
 
 		if (ready_to_fire(robptr, ailp)) {
 			int do_stuff = 0;
@@ -1350,6 +1363,10 @@ int add_awareness_event(object *objp, int type)
 // The object (probably player or weapon) which created the awareness is objp.
 void create_awareness_event(object *objp, int type)
 {
+	if (object_is_observer(objp)) {
+		return;
+	}
+
 	// If not in multiplayer, or in multiplayer with robots, do this, else unnecessary!
 	if (!(Game_mode & GM_MULTI) || (Game_mode & GM_MULTI_ROBOTS)) {
 		if (add_awareness_event(objp, type)) {
@@ -1765,6 +1782,12 @@ int ai_restore_state(PHYSFS_file *fp, int version, int swap)
 		Escort_special_goal = PHYSFSX_readSXE32(fp, swap);
 		Escort_goal_index = PHYSFSX_readSXE32(fp, swap);
 		PHYSFS_read(fp, &Stolen_items, sizeof(Stolen_items[0]) * MAX_STOLEN_ITEMS, 1);
+
+		// rebirth uses UINT8_MAX for ESCORT_GOAL_UNSPECIFIED
+		if (Escort_goal_object == 255)
+			Escort_goal_object = ESCORT_GOAL_UNSPECIFIED;
+		if (Escort_special_goal == 255)
+			Escort_special_goal = ESCORT_GOAL_UNSPECIFIED;
 	} else {
 		int i;
 
