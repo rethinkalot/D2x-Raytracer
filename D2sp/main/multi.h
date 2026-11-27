@@ -60,7 +60,8 @@ extern int multi_protocol; // set and determinate used protocol
 #define MULTI_PROTO_UDP 1 // UDP protocol
 
 // What version of the multiplayer protocol is this? Increment each time something drastic changes in Multiplayer without the version number changes. Can be reset to 0 each time the version of the game changes
-#define MULTI_PROTO_VERSION 30006 // Redux 1.1 + SLikeNet in-game transport + host Change Map message
+// 30107: shared by D2s and D2X Raytracer (crossplay) = Redux 1.1 + SLikeNet + MULTI_DMAX_SHIELDS.
+#define MULTI_PROTO_VERSION 30107
 
 // PROTOCOL VARIABLES AND DEFINES - END
 
@@ -147,6 +148,7 @@ extern int multi_protocol; // set and determinate used protocol
 	VALUE(MULTI_SHIP_STATUS          , 44)  \
 	VALUE(MULTI_CREATE_EXPLOSION2    , 24)  \
 	VALUE(MULTI_CHANGE_MAP           , 13)  /* host's Change Map: pnum, mission file name (9), level, change id */ \
+	VALUE(MULTI_DMAX_SHIELDS         , 9)	/* shields + invulnerability for shield bubbles (raytracer sends it) */	\
 	AFTER
 for_each_multiplayer_command(enum {, define_multiplayer_command, });
 

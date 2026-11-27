@@ -7630,6 +7630,8 @@ void multi_process_data(const ubyte *buf, int len)
             multi_do_create_explosion2(buf); break;
         case MULTI_CHANGE_MAP:
             multi_do_change_map(buf); break;
+        case MULTI_DMAX_SHIELDS:
+            break; // raytracer players' shield state, for shield bubbles (not drawn in D2s yet)
         default:
             Int3();
     }

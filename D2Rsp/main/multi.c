@@ -1445,10 +1445,6 @@ void multi_do_frame(void)
 
 	multi_send_dmax_shields(); // for other players' shield bubbles
 
-	if (Game_mode & GM_MULTI_ROBOTS)
-	{
-		multi_check_robot_timeout();
-	}
     if (Game_mode & GM_MULTI_ROBOTS)
     {
         multi_check_robot_timeout();

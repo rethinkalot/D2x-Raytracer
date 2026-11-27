@@ -60,9 +60,8 @@ extern int multi_protocol; // set and determinate used protocol
 #define MULTI_PROTO_UDP 1 // UDP protocol
 
 // What version of the multiplayer protocol is this? Increment each time something drastic changes in Multiplayer without the version number changes. Can be reset to 0 each time the version of the game changes
-// 30106: D2X Raytracer = Redux 1.1 + SLikeNet (30006) + DMAX MULTI_DMAX_SHIELDS.
-// D2s builds would drop the rest of any packet holding MULTI_DMAX_SHIELDS, so they must not mix.
-#define MULTI_PROTO_VERSION 30106
+// 30107: shared by D2s and D2X Raytracer (crossplay) = Redux 1.1 + SLikeNet + MULTI_DMAX_SHIELDS.
+#define MULTI_PROTO_VERSION 30107
 
 // PROTOCOL VARIABLES AND DEFINES - END
 
