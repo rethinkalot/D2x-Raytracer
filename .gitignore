@@ -49,3 +49,13 @@ Thumbs.db
 # Local backups #
 #################
 *.before-shields
+
+# Local setup (not shared) #
+############################
+CLAUDE.md
+.vs/
+.vscode/
+CMakeSettings.json
+CMakeUserPresets.json
+*.user
+out/
