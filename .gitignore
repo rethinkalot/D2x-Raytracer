@@ -96,3 +96,6 @@ CPackSourceConfig.cmake
 CMakeUserPresets.json
 CLAUDE.md
 .claude/
+out-copied-from-D2Rs/
+D2sp/build-copied-from-D2s/
+D2sp/build-old-path/

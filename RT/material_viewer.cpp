@@ -1,5 +1,4 @@
 #include <imgui.h>
-#include <time.h>
 
 
 #include "Renderer.h"
@@ -96,19 +95,9 @@ struct RT_MaterialViewer
 	RT_MaterialUndoNode *first_free_undo_node;
 	RT_MaterialUndoNode *first_undo;
 	RT_MaterialUndoNode *first_redo;
-
-	bool open_confirm_save;
-	bool confirm_save_all;
-	int  confirm_save_count;
-
-	char backup_dir[64];
-	bool backup_dir_made;
 };
 
 static RT_MaterialViewer viewer;
-
-// Saving or editing more materials than this at once asks first / shows a warning
-#define MASS_EDIT_LIMIT 25
 
 typedef uint32_t RT_MaterialModifiedFlags;
 enum RT_MaterialModifiedFlags_
@@ -387,37 +376,6 @@ static void DoRedo()
 	}
 }
 
-// Copies a loose .material into this save's backup folder before it's overwritten. False = don't overwrite it.
-static bool BackupMaterialFile(const char *rel_file, const char *bitmap_name)
-{
-	if (!PHYSFS_exists(rel_file))
-		return true; // nothing there to lose
-
-	if (!viewer.backup_dir_made)
-	{
-		if (!PHYSFS_mkdir(viewer.backup_dir))
-			return false;
-		viewer.backup_dir_made = true;
-	}
-
-	char backup_file[128];
-	snprintf(backup_file, sizeof(backup_file), "%s/%s.material", viewer.backup_dir, bitmap_name);
-
-	PHYSFS_File *in = PHYSFS_openRead(rel_file);
-	if (!in)
-		return false;
-	PHYSFS_File *out = PHYSFS_openWrite(backup_file);
-	bool ok = out != NULL;
-	char buf[4096];
-	PHYSFS_sint64 n;
-	while (ok && (n = PHYSFS_readBytes(in, buf, sizeof(buf))) > 0)
-		ok = PHYSFS_writeBytes(out, buf, (PHYSFS_uint64)n) == n;
-	PHYSFS_close(in);
-	if (out)
-		ok = PHYSFS_close(out) && ok;
-	return ok;
-}
-
 static void SaveIfModified(uint16_t bm_index)
 {
 	grs_bitmap *bitmap = &GameBitmaps[bm_index];
@@ -438,11 +396,6 @@ static void SaveIfModified(uint16_t bm_index)
 	if (needs_to_be_saved)
 	{
 		RT_MaterialModifiedFlags changes = GetMaterialChangesFromDefaults(bm_index); // anything that differs from the defaults needs to be saved
-
-		// A blank path would hide the texture from every layer below, so it is never written
-		for (int i = 0; i < RT_MaterialTextureSlot_COUNT; i++)
-			if (!paths->textures[i][0])
-				changes &= ~(RT_MaterialModifiedFlags_AlbedoMap << i);
 
 		RT_Config cfg;
 		RT_InitializeConfig(&cfg, temp);
@@ -513,13 +466,8 @@ static void SaveIfModified(uint16_t bm_index)
 			}
 		}
 
-		char rel_file[64];
-		snprintf(rel_file, sizeof(rel_file), "assets/textures/%s.material", bitmap_name);
-		if (!BackupMaterialFile(rel_file, bitmap_name))
-			return; // never overwrite a file that couldn't be backed up
-
-		char out_file[PATH_MAX];
-		if (PHYSFSX_getRealPath(rel_file, out_file) && RT_SerializeConfigToFile(&cfg, out_file))
+		char *out_file = RT_ArenaPrintF(temp, "assets/textures/%s.material", bitmap_name);
+		if (RT_SerializeConfigToFile(&cfg, out_file))
 		{
 			// Update last saved states so we know when the material has changed, again.
 			viewer.materials_last_saved_states[bm_index] = *material;
@@ -544,50 +492,6 @@ static void SaveAll()
 	for (uint16_t bm_index = 0; bm_index < MAX_BITMAP_FILES; bm_index++)
 	{
 		SaveIfModified(bm_index);
-	}
-}
-
-static bool NeedsSave(uint16_t bm_index)
-{
-	return GameBitmaps[bm_index].bm_w && GameBitmaps[bm_index].bm_h && GetMaterialChangesFromLastSave(bm_index);
-}
-
-static void DoSave(bool all)
-{
-	// One backup folder per save, made only if a file is actually replaced
-	time_t now = time(NULL);
-	strftime(viewer.backup_dir, sizeof(viewer.backup_dir), "assets/material_backups/%Y-%m-%d_%H-%M-%S", localtime(&now));
-	viewer.backup_dir_made = false;
-
-	if (all)
-		SaveAll();
-	else
-		SaveSelected();
-}
-
-static void RequestSave(bool all)
-{
-	int count = 0;
-	if (all)
-	{
-		for (uint16_t bm_index = 0; bm_index < MAX_BITMAP_FILES; bm_index++)
-			count += NeedsSave(bm_index);
-	}
-	else
-	{
-		for (size_t i = 0; i < viewer.selected_material_count; i++)
-			count += NeedsSave(viewer.selected_materials[i]);
-	}
-
-	if (count > MASS_EDIT_LIMIT)
-	{
-		viewer.confirm_save_all = all;
-		viewer.confirm_save_count = count;
-		viewer.open_confirm_save = true;
-	}
-	else
-	{
-		DoSave(all);
 	}
 }
 
@@ -638,13 +542,14 @@ void RT_DoMaterialViewerMenus()
 			viewer.textures_reloaded_timer = 2.0f;
 		}
 
+		if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
+		{
+			SaveSelected();
+		}
+
 		if (io.KeyCtrl && io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_S))
 		{
-			RequestSave(true);
-		}
-		else if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_S))
-		{
-			RequestSave(false);
+			SaveAll();
 		}
 	}
 
@@ -662,54 +567,12 @@ void RT_DoMaterialViewerMenus()
 
 				if (ImGui::MenuItem("Save Selected", "Ctrl + S"))
 				{
-					RequestSave(false);
+					SaveSelected();
 				}
 
 				if (ImGui::MenuItem("Save All", "Ctrl + Shift + S"))
 				{
-					RequestSave(true);
-				}
-				ImGui::EndMenu();
-			}
-
-			if (ImGui::BeginMenu("Texture Packs"))
-			{
-				if (g_rt_texture_pack_count == 0)
-					ImGui::TextDisabled("No .zip packs in assets/texturepacks");
-
-				for (int i = 0; i < g_rt_texture_pack_count; i++)
-				{
-					ImGui::PushID(i);
-					int swap_with = -1;
-					if (ImGui::ArrowButton("up", ImGuiDir_Up) && i > 0)
-						swap_with = i - 1;
-					ImGui::SameLine();
-					if (ImGui::ArrowButton("down", ImGuiDir_Down) && i + 1 < g_rt_texture_pack_count)
-						swap_with = i + 1;
-					if (swap_with >= 0)
-					{
-						RT_TexturePack tmp = g_rt_texture_packs[i];
-						g_rt_texture_packs[i] = g_rt_texture_packs[swap_with];
-						g_rt_texture_packs[swap_with] = tmp;
-					}
-					ImGui::SameLine();
-					RT_TexturePack *pack = &g_rt_texture_packs[i];
-					ImGui::Checkbox(pack->name, &pack->enabled);
-					if (pack->enabled && !pack->mounted)
-					{
-						ImGui::SameLine();
-						ImGui::TextDisabled("(not loaded)");
-					}
-					ImGui::PopID();
-				}
-
-				ImGui::Separator();
-				ImGui::TextDisabled("Top pack wins. Loose assets/textures files override every pack.");
-				ImGui::TextDisabled("Apply reloads all materials from files: save edits first.");
-				if (ImGui::MenuItem("Apply"))
-				{
-					RT_ApplyTexturePacks();
-					viewer.initialized = false; // re-read the saved states from the new materials
+					SaveAll();
 				}
 				ImGui::EndMenu();
 			}
@@ -782,29 +645,7 @@ void RT_DoMaterialViewerMenus()
 			}
 
 			ImGui::EndMenuBar();
-		}
-
-		if (viewer.open_confirm_save)
-		{
-			ImGui::OpenPopup("Confirm Save");
-			viewer.open_confirm_save = false;
-		}
-		if (ImGui::BeginPopupModal("Confirm Save", NULL, ImGuiWindowFlags_AlwaysAutoResize))
-		{
-			ImGui::Text("Save %d materials at once?", viewer.confirm_save_count);
-			ImGui::TextDisabled("Files they replace are copied to assets/material_backups first.");
-			if (ImGui::Button("Save"))
-			{
-				DoSave(viewer.confirm_save_all);
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::SameLine();
-			if (ImGui::Button("Cancel"))
-			{
-				ImGui::CloseCurrentPopup();
-			}
-			ImGui::EndPopup();
-		}
+		} 
 
 		ImGui::BeginChild("Material Viewer", ImVec2(ImGui::GetContentRegionAvail().x, 260), true);
 		{
@@ -1095,9 +936,6 @@ void RT_DoMaterialViewerMenus()
 			piggy_get_bitmap_name(last_bitmap_index, last_bitmap);
 
 			ImGui::Text("Bitmap #%hu..#%hu: %s .. %s", first_bitmap_index, last_bitmap_index, first_bitmap, last_bitmap);
-
-			if (viewer.selected_material_count > MASS_EDIT_LIMIT)
-				ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "Editing %d materials at once (Ctrl+Z undoes it)", viewer.selected_material_count);
 		}
 		else
 		{
@@ -1307,7 +1145,7 @@ void RT_DoMaterialViewerMenus()
 					if (viewer.selected_material_count == 1)
 					{
 						RT_MaterialPaths *first_paths = &g_rt_material_paths[viewer.selected_materials[0]];
-						name = RT_ArenaPrintF(temp, "%s (%s) [%s]", g_rt_texture_slot_names[i], first_paths->textures[i], RT_GetTextureSource(viewer.selected_materials[0], i));
+						name = RT_ArenaPrintF(temp, "%s (%s)", g_rt_texture_slot_names[i], first_paths->textures[i]);
 					}
 					if (ImGui::Selectable(name, is_selected, flags))
 					{
@@ -1323,7 +1161,6 @@ void RT_DoMaterialViewerMenus()
 
 			if (viewer.selected_material_count == 1)
 			{
-				ImGui::TextDisabled("Loaded from: %s", RT_GetTextureSource(viewer.selected_materials[0], viewer.viewed_texture_slot));
 				RT_ResourceHandle texture = first_material->textures[viewer.viewed_texture_slot];
 				RT_RenderImGuiTexture(texture, 256, 256);
 			}

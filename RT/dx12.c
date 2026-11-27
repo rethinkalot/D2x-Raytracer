@@ -294,15 +294,13 @@ void dx12_loadbmtexture_f(grs_bitmap* bm, int texfilt)
 	}
 }
 
-RT_Image RT_LoadLayeredImage(RT_Arena *arena, const char *file, int channel_count, bool is_srgb); // RTmaterials.c
-
 void dx12_load_png(grs_bitmap *bm, const char *basename)
 {
 	RT_ArenaMemoryScope(&g_thread_arena)
 	{
-		char *file = RT_ArenaPrintF(&g_thread_arena, "%s_basecolor.png", basename);
+		char *file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s_basecolor.png", basename);
 
-		RT_Image image = RT_LoadLayeredImage(&g_thread_arena, file, 4, false);
+		RT_Image image = RT_LoadImageFromDisk(&g_thread_arena, file, 4, false);
 
 		if (image.pixels)
 		{

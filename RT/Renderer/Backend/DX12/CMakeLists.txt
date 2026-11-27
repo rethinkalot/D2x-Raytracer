@@ -172,4 +172,4 @@ set_target_properties ( Showcase_Renderer PROPERTIES
 endif()
 
 #copies over external assets if they are changed.
-#add_subdirectory("assets")
+add_subdirectory("assets")

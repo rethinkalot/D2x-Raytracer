@@ -92,16 +92,16 @@ add_subdirectory ("sdl-mixer-master")
 add_subdirectory ("physfs-main")
 add_subdirectory ("RT")
 #add_subdirectory ("d1")
-add_subdirectory ("d2")
+add_subdirectory ("D2Rsp")
 
 if(${GRAPHICS_API} STREQUAL "DirectX12")
 
 add_custom_target(renderer_to_d2
     COMMAND ${CMAKE_COMMAND} -E copy
     "$<TARGET_FILE_DIR:Renderer>/Renderer.dll"
-    ${CMAKE_BINARY_DIR}/d2
+    ${CMAKE_BINARY_DIR}/D2Rsp
     # Symbols are optional; Renderer emits them beside its DLL when enabled.
-    COMMENT "Copying Renderer to output d2 folder")
+    COMMENT "Copying Renderer to output D2Rsp folder")
 add_dependencies(renderer_to_d2 Renderer)
 add_dependencies(descent2 renderer_to_d2)
 

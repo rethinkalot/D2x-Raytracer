@@ -1,13 +1,15 @@
 @echo off
-rem D2x-Raytracer isolated build + deploy.
+rem PARITY TEST BUILD: D2X Raytracer (D2Rsp) from C:\Games\D2sRestore.
+rem Deploys only to C:\Games\D2xR3 as D2x-RayTracer3.exe (never the real testbenches).
 rem Everything below lives only in this process (setlocal). Nothing touches the
 rem Windows/user env, global PATH, or the MSYS2 MinGW toolchain used by D1s/D2s.
 setlocal
 set "ROOT=%~dp0"
 set "T=%ROOT%toolchain"
 set "PRESET=directx12-win-release"
-set "OUT=%ROOT%out\build\%PRESET%\d2"
-set "DEPLOY=C:\Games\D2xRT"
+set "OUT=%ROOT%out\build\%PRESET%\D2Rsp"
+set "DEPLOY=C:\Games\D2xR3"
+set "EXE=D2x-RayTracer3.exe"
 
 rem Minimal PATH: Windows + Git (vcpkg registry) + local cmake/ninja. No mingw64.
 set "PATH=%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\WindowsPowerShell\v1.0;C:\Program Files\Git\cmd;%T%\cmake\bin;%T%\ninja"
@@ -30,14 +32,15 @@ if not exist "%OUT%\descent2.exe" (
   goto :fail
 )
 
-taskkill /F /IM descent2.exe >nul 2>&1
+taskkill /F /IM %EXE% >nul 2>&1
 timeout /t 1 /nobreak >nul
 rem Copy game files only; never deletes anything already in the testbench (game data).
-robocopy "%OUT%" "%DEPLOY%" /E /NJH /NJS /NDL /NP /XD CMakeFiles /XF *.cmake *.ninja *.obj *.lib *.exp *.ilk
+robocopy "%OUT%" "%DEPLOY%" /E /NJH /NJS /NDL /NP /XD CMakeFiles /XF *.cmake *.ninja *.obj *.lib *.exp *.ilk descent2.exe
 if errorlevel 8 goto :fail
+copy /Y "%OUT%\descent2.exe" "%DEPLOY%\%EXE%" >nul || goto :fail
 echo Confirm Complete
 exit /b 0
 
 :fail
-echo D2x-Raytracer build FAILED 1>&2
+echo D2x-Raytracer parity build FAILED 1>&2
 exit /b 1

@@ -555,7 +555,7 @@ void TestHybridVisibilityCases(RT_Camera camera) {
         pixels[y*64+x]=((x/8+y/8)&1) ? 0xFF1450FFu : 0x001450FFu;
     RT_UploadTextureParams upload={}; upload.image.width=64; upload.image.height=64;
     upload.image.format=RT_TextureFormat_RGBA8; upload.image.pixels=pixels.data();
-    upload.name="DMAX 11 VR alpha visibility fixture";
+    upload.name="DMAX 12 VR alpha visibility fixture";
     const auto texture=RenderBackend::UploadTexture(upload);
     RT_Material material={}; material.albedo_texture=texture;
     material.flags=RT_MaterialFlag_BlackbodyRadiator;
@@ -577,7 +577,7 @@ void TestHybridVisibilityCases(RT_Camera camera) {
         tiles[tri].segment=7; tiles[tri].segment_adjacent=0;
     }
     RT_UploadMeshParams meshUpload={}; meshUpload.triangle_count=2; meshUpload.triangles=tiles;
-    meshUpload.name="DMAX 11 VR segment fixture";
+    meshUpload.name="DMAX 12 VR segment fixture";
     const auto mesh=RenderBackend::UploadMesh(meshUpload);
     const bool savedRetrace=tweak_vars.retrace_rays; tweak_vars.retrace_rays=true;
     for(int test=0;test<5;++test) for(int hybrid=0;hybrid<2;++hybrid) {
@@ -958,15 +958,15 @@ void OpenVRPrototype::Init() {
     const bool selfTest=HasArgument(L"-openvr-selftest");
     levelTest=HasArgument(L"-openvr-leveltest");
     const bool vrRequested=HasArgument(L"-openvr");
-    SetWindowTextA(g_d3d.hWnd,vrRequested ? "DMAX 11 VR" : "DMAX 11");
+    SetWindowTextA(g_d3d.hWnd,vrRequested ? "Dmax 12 D2x-RayTracer3 VR" : "Dmax 12 D2x-RayTracer3");
     if(!vrRequested && !selfTest) {
-        Log("DMAX 11: desktop mode; add -OpenVR to enable optimized VR.");
+        Log("DMAX 12: desktop mode; add -OpenVR to enable optimized VR.");
         return;
     }
     // One public mode switch selects the complete current VR prototype.
     // The reference visibility flag is retained only for diagnostic A/B runs.
 
-    Log("DMAX 11 VR optimization: exact blue-noise atlas; conservative opaque-alpha fast path.");
+    Log("DMAX 12 VR optimization: exact blue-noise atlas; conservative opaque-alpha fast path.");
     fastVisualReference=HasArgument(L"-openvr-fast-visual-reference");
     indirectLighting=!fastVisualReference;
     // The public -OpenVR entry point uses the validated smooth lighting budget.
@@ -981,7 +981,7 @@ void OpenVRPrototype::Init() {
     char lightLog[160]; std::snprintf(lightLog,sizeof(lightLog),"VR lighting candidate budget %u (0=full); small light sets retain full selection.",lightCandidateBudget); Log(lightLog);
     hybridVisibility=(fastVisualReference || HasArgument(L"-openvr-hybrid-visibility")) && !HasArgument(L"-openvr-ray-visibility");
     if(hybridVisibility) {
-        Log("DMAX 11 VR: experimental raster visibility with ray-traced lighting.");
+        Log("DMAX 12 VR: experimental raster visibility with ray-traced lighting.");
     }
     char spatialSetting[16]={};
     fastSpatial=!(GetEnvironmentVariableA("D2_VR_REFERENCE_GPU",spatialSetting,sizeof(spatialSetting))>0 && std::atoi(spatialSetting)!=0);

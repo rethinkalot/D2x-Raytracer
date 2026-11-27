@@ -1,5 +1,4 @@
 #include <time.h>
-#include <stdlib.h>
 
 // ------------------------------------------------------------------
 
@@ -62,391 +61,105 @@ RT_MaterialPaths		g_rt_material_paths_default	[RT_MAX_TEXTURES];
 
 static int g_rt_last_texture_update_time = 0;
 
-// ------------------------------------------------------------------
-// Texture layers, highest priority first:
-//   layer 0  = loose files in assets/textures (the material editor saves here)
-//   layer 1+ = enabled packs from assets/texturepacks.txt, top line first,
-//              each zip mounted at "rtpack<layer>" and holding a textures/ folder
-// Below all layers is the game's own pig bitmap.
-
-#define RT_PACK_DIR  "assets/texturepacks"
-#define RT_PACK_LIST "assets/texturepacks.txt"
-
-RT_TexturePack g_rt_texture_packs[RT_MAX_TEXTURE_PACKS];
-int g_rt_texture_pack_count;
-
-static char g_rt_mounted_packs[RT_MAX_TEXTURE_PACKS][PATH_MAX]; // real zip paths, so they can be unmounted
-static int g_rt_layer_pack[RT_MAX_TEXTURE_PACKS + 1] = { -1 }; // layer -> g_rt_texture_packs index
-static int g_rt_layer_count = 1;
-static char **g_rt_layer_files[RT_MAX_TEXTURE_PACKS + 1]; // sorted names in each layer's textures folder
-static int g_rt_layer_file_count[RT_MAX_TEXTURE_PACKS + 1];
-static signed char g_rt_slot_layer[RT_MAX_TEXTURES][RT_MaterialTextureSlot_COUNT]; // -1 = no file
-static uint32_t g_rt_material_layers[RT_MAX_TEXTURES]; // bit per layer whose .material was applied
-
-static const char *g_rt_slot_keys[RT_MaterialTextureSlot_COUNT] =
+static void RT_ParseMaterialDefinitionFile(int bm_index, RT_Material *material, RT_MaterialPaths *paths, 
+										   // NOTE(daniel): These are dumb, but I have to set metalness/roughness to 1 by default
+										   // if there exists a metalness/roughness map, but if the file changed the metalness/roughness
+										   // factor then I don't want to override it...
+										   bool *default_metalness, 
+										   bool *default_roughness) 
 {
-	[RT_MaterialTextureSlot_Albedo]    = "albedo_texture",
-	[RT_MaterialTextureSlot_Normal]    = "normal_texture",
-	[RT_MaterialTextureSlot_Metalness] = "metalness_texture",
-	[RT_MaterialTextureSlot_Roughness] = "roughness_texture",
-	[RT_MaterialTextureSlot_Emissive]  = "emissive_texture",
-};
+	if (default_metalness) *default_metalness = true;
+	if (default_roughness) *default_roughness = true;
 
-static int RT_CompareNames(const void *a, const void *b)
-{
-	return d_stricmp(*(char *const *)a, *(char *const *)b);
-}
-
-static void RT_LayerDir(int layer, char *out, size_t out_size)
-{
-	if (layer == 0)
-		snprintf(out, out_size, "assets/textures");
-	else
-		snprintf(out, out_size, "rtpack%d/textures", layer);
-}
-
-// One directory listing per layer instead of a PHYSFS_exists per slot (thousands of lookups at startup)
-static void RT_IndexLayer(int layer)
-{
-	char dir[32];
-	RT_LayerDir(layer, dir, sizeof(dir));
-
-	if (g_rt_layer_files[layer])
-		PHYSFS_freeList(g_rt_layer_files[layer]);
-	g_rt_layer_files[layer] = PHYSFS_enumerateFiles(dir);
-	g_rt_layer_file_count[layer] = 0;
-	if (!g_rt_layer_files[layer])
-		return;
-	while (g_rt_layer_files[layer][g_rt_layer_file_count[layer]])
-		g_rt_layer_file_count[layer]++;
-	qsort(g_rt_layer_files[layer], g_rt_layer_file_count[layer], sizeof(char *), RT_CompareNames);
-}
-
-// Writes the PhysFS path of file in this layer to out, if the layer has it
-static bool RT_LayerFile(int layer, const char *file, char *out, size_t out_size)
-{
-	char dir[32];
-	RT_LayerDir(layer, dir, sizeof(dir));
-
-	if (strchr(file, '/')) // a subfolder: not in the index
-	{
-		snprintf(out, out_size, "%s/%s", dir, file);
-		return PHYSFS_exists(out);
-	}
-	char **found = g_rt_layer_files[layer] ? bsearch(&file, g_rt_layer_files[layer], g_rt_layer_file_count[layer], sizeof(char *), RT_CompareNames) : NULL;
-	if (!found)
-		return false;
-	snprintf(out, out_size, "%s/%s", dir, *found); // the listed name: zip lookups are case sensitive
-	return true;
-}
-
-// The highest layer that has this texture wins; inside one layer a .dds beats a .png. Returns the layer, or -1.
-static int RT_FindMaterialTexture(const char *value, char *out, size_t out_size)
-{
-	bool has_ext = strstr(value, ".dds") || strstr(value, ".png");
-
-	for (int layer = 0; layer < g_rt_layer_count; layer++)
-	{
-		char name[300];
-
-		if (has_ext)
-		{
-			if (RT_LayerFile(layer, value, out, out_size))
-				return layer;
-			continue;
-		}
-		snprintf(name, sizeof(name), "%s.dds", value);
-		if (RT_LayerFile(layer, name, out, out_size))
-			return layer;
-		snprintf(name, sizeof(name), "%s.png", value);
-		if (RT_LayerFile(layer, name, out, out_size))
-			return layer;
-	}
-	return -1;
-}
-
-// Reads a whole file through PhysFS. Returns count 0 if it can't be read.
-static RT_String RT_ReadGameFile(RT_Arena *arena, const char *path)
-{
-	RT_String result = {0};
-	PHYSFS_File *f = PHYSFS_openRead(path);
-
-	if (!f)
-		return result;
-	PHYSFS_sint64 len = PHYSFS_fileLength(f);
-	if (len > 0)
-	{
-		char *bytes = RT_ArenaAllocNoZero(arena, (size_t)len + 1, 16);
-		if (PHYSFS_readBytes(f, bytes, (PHYSFS_uint64)len) == len)
-		{
-			bytes[len] = 0;
-			result.bytes = bytes;
-			result.count = (size_t)len;
-		}
-	}
-	PHYSFS_close(f);
-	return result;
-}
-
-RT_Image RT_LoadLayeredImage(RT_Arena *arena, const char *file, int channel_count, bool is_srgb)
-{
-	RT_Image image = {0};
-	char path[PATH_MAX];
-
-	if (RT_FindMaterialTexture(file, path, sizeof(path)) >= 0)
-	{
-		RT_String bytes = RT_ReadGameFile(arena, path);
-		if (bytes.count)
-			image = RT_LoadImageFromMemory(arena, bytes.bytes, bytes.count, channel_count, is_srgb);
-	}
-	return image;
-}
-
-static void RT_AddTexturePack(const char *name, bool enabled)
-{
-	if (g_rt_texture_pack_count >= RT_MAX_TEXTURE_PACKS || !*name)
-		return;
-	for (int i = 0; i < g_rt_texture_pack_count; i++)
-		if (!d_stricmp(g_rt_texture_packs[i].name, name))
-			return;
-
-	RT_TexturePack *pack = &g_rt_texture_packs[g_rt_texture_pack_count++];
-	snprintf(pack->name, sizeof(pack->name), "%s", name);
-	pack->enabled = enabled;
-	pack->mounted = false;
-}
-
-// The pack list in order, then any zip in the pack folder it doesn't name, added at the bottom (lowest priority) and on.
-static void RT_LoadTexturePackList(void)
-{
-	static const char *const zip_ext[] = { ".zip", NULL };
-
-	g_rt_texture_pack_count = 0;
 	RT_ArenaMemoryScope(&g_thread_arena)
 	{
-		RT_String list = RT_ReadGameFile(&g_thread_arena, RT_PACK_LIST);
-		char *line = list.bytes;
-
-		while (line && *line)
-		{
-			size_t len = strcspn(line, "\r\n");
-			char *next = line + len;
-			next += strspn(next, "\r\n");
-			line[len] = 0;
-			while (len && (line[len - 1] == ' ' || line[len - 1] == '\t'))
-				line[--len] = 0;
-
-			bool enabled = true;
-			while (*line == ' ' || *line == '\t')
-				line++;
-			if (*line == '-')
-			{
-				enabled = false;
-				line++;
-			}
-			RT_AddTexturePack(line, enabled);
-			line = next;
-		}
-	}
-
-	char **found = PHYSFSX_findFiles(RT_PACK_DIR, zip_ext);
-	if (found)
-	{
-		for (char **f = found; *f; f++)
-			RT_AddTexturePack(*f, true);
-		PHYSFS_freeList(found);
-	}
-}
-
-static void RT_SaveTexturePackList(void)
-{
-	PHYSFS_File *f = PHYSFS_openWrite(RT_PACK_LIST);
-
-	if (!f)
-	{
-		con_printf(CON_URGENT, "RT: could not write %s\n", RT_PACK_LIST);
-		return;
-	}
-	for (int i = 0; i < g_rt_texture_pack_count; i++)
-		PHYSFSX_printf(f, "%s%s\n", g_rt_texture_packs[i].enabled ? "" : "-", g_rt_texture_packs[i].name);
-	PHYSFS_close(f);
-}
-
-static void RT_MountTexturePacks(void)
-{
-	for (int i = 0; i < RT_MAX_TEXTURE_PACKS; i++)
-	{
-		if (g_rt_mounted_packs[i][0])
-			PHYSFS_unmount(g_rt_mounted_packs[i]);
-		g_rt_mounted_packs[i][0] = 0;
-	}
-
-	g_rt_layer_count = 1;
-	for (int i = 0; i < g_rt_texture_pack_count; i++)
-	{
-		RT_TexturePack *pack = &g_rt_texture_packs[i];
-		char rel[PATH_MAX], mount[32];
-		int layer = g_rt_layer_count;
-		char *real = g_rt_mounted_packs[layer - 1];
-
-		pack->mounted = false;
-		if (!pack->enabled)
-			continue;
-		snprintf(rel, sizeof(rel), RT_PACK_DIR "/%s", pack->name);
-		snprintf(mount, sizeof(mount), "rtpack%d", layer);
-		if (PHYSFSX_getRealPath(rel, real) && PHYSFS_mount(real, mount, 1))
-		{
-			pack->mounted = true;
-			g_rt_layer_pack[layer] = i;
-			g_rt_layer_count++;
-			con_printf(CON_NORMAL, "RT texture pack %d: %s\n", layer, pack->name);
-		}
-		else
-		{
-			con_printf(CON_URGENT, "RT texture pack not mounted: %s\n", rel);
-			real[0] = 0;
-		}
-	}
-
-	for (int layer = 0; layer <= RT_MAX_TEXTURE_PACKS; layer++)
-	{
-		if (layer < g_rt_layer_count)
-			RT_IndexLayer(layer);
-		else if (g_rt_layer_files[layer])
-		{
-			PHYSFS_freeList(g_rt_layer_files[layer]);
-			g_rt_layer_files[layer] = NULL;
-			g_rt_layer_file_count[layer] = 0;
-		}
-	}
-}
-
-static const char *RT_LayerName(int layer)
-{
-	if (layer < 0)
-		return "none";
-	if (layer == 0)
-		return "assets/textures";
-	return g_rt_texture_packs[g_rt_layer_pack[layer]].name;
-}
-
-const char *RT_GetTextureSource(int bm_index, int slot)
-{
-	int layer = g_rt_slot_layer[bm_index][slot];
-
-	if (layer < 0)
-		return slot == RT_MaterialTextureSlot_Albedo ? "original game bitmap" : "none";
-	return RT_LayerName(layer);
-}
-
-static void RT_WriteTextureSourceReport(void)
-{
-	PHYSFS_File *f = PHYSFS_openWrite("texture_sources.txt");
-
-	if (!f)
-		return;
-	PHYSFSX_printf(f, "Raytracer texture sources. Layers, highest priority first:\n");
-	for (int layer = 0; layer < g_rt_layer_count; layer++)
-		PHYSFSX_printf(f, "  %d: %s\n", layer, RT_LayerName(layer));
-	PHYSFSX_printf(f, "  last: original game bitmap\n\n");
-
-	for (uint16_t bm_index = 1; bm_index < MAX_BITMAP_FILES; bm_index++)
-	{
-		if (GameBitmaps[bm_index].bm_w == 0 || GameBitmaps[bm_index].bm_h == 0)
-			continue;
-
 		char bitmap_name[13];
 		piggy_get_bitmap_name(bm_index, bitmap_name);
-		PHYSFSX_printf(f, "%-12s material=", bitmap_name);
-		if (!g_rt_material_layers[bm_index])
-			PHYSFSX_printf(f, "default");
-		for (int layer = g_rt_layer_count - 1, first = 1; layer >= 0; layer--)
-			if (g_rt_material_layers[bm_index] & (1u << layer))
-			{
-				PHYSFSX_printf(f, "%s%s", first ? "" : "+", RT_LayerName(layer));
-				first = 0;
-			}
-		for (int i = 0; i < RT_MaterialTextureSlot_COUNT; i++)
-			PHYSFSX_printf(f, "  %s=%s", g_rt_texture_slot_names[i], RT_GetTextureSource(bm_index, i));
-		PHYSFSX_printf(f, "\n");
-	}
-	PHYSFS_close(f);
-}
 
-// Applies the .material files of layers first..last on top of material/paths, lowest priority first.
-// Only keys a file has are applied, and a blank texture path never replaces one from below.
-static void RT_ApplyMaterialLayers(int bm_index, RT_Material *material, RT_MaterialPaths *paths, int first, int last,
-								   // NOTE(daniel): metalness/roughness default to 1 when a map exists, unless a file set the factor
-								   bool *has_metalness, bool *has_roughness)
-{
-	static const struct { const char *key; uint32_t flag; } flag_keys[] =
-	{
-		{ "blackbody",          RT_MaterialFlag_BlackbodyRadiator },
-		{ "no_casting_shadow",  RT_MaterialFlag_NoCastingShadow },
-		{ "is_light",           RT_MaterialFlag_Light },
-		{ "fsr2_reactive_mask", RT_MaterialFlag_Fsr2ReactiveMask },
-	};
-
-	char bitmap_name[13];
-	piggy_get_bitmap_name(bm_index, bitmap_name);
-
-	// NOTE(daniel): Substance Designer does not like hashtags in names and
-	// turns them into underscores.
-	for (char *c = bitmap_name; *c; c++)
-	{
-		if (*c == '#')
+		// NOTE(daniel): Substance Designer does not like hashtags in names and
+		// turns them into underscores.
+		for (char *c = bitmap_name; *c; c++)
 		{
-			*c = '_';
+			if (*c == '#')
+			{
+				*c = '_';
+			}
 		}
-	}
 
-	char material_file[32];
-	snprintf(material_file, sizeof(material_file), "%s.material", bitmap_name);
+		// ------------------------------------------------------------------
+		// - IMPORTANT ------------------------------------------------------
+		// ------------------------------------------------------------------
 
-	for (int layer = last; layer >= first; layer--)
-	{
-		char path[PATH_MAX];
+		// Don't initialize any defaults for the material or material paths
+		// in this function. Don't do it, I tell you! Just things read from
+		// the material definition file!!
 
-		if (!RT_LayerFile(layer, material_file, path, sizeof(path)))
-			continue;
+		char *material_file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s.material", bitmap_name);
 
-		RT_ArenaMemoryScope(&g_thread_arena)
+		RT_Config cfg;
+		RT_InitializeConfig(&cfg, &g_thread_arena);
+
+		if (RT_DeserializeConfigFromFile(&cfg, material_file))
 		{
-			RT_String text = RT_ReadGameFile(&g_thread_arena, path);
-			RT_Config cfg;
-			RT_InitializeConfig(&cfg, &g_thread_arena);
-			RT_DeserializeConfigFromString(&cfg, text);
-			g_rt_material_layers[bm_index] |= 1u << layer;
+			RT_String string;
 
-			for (int i = 0; i < RT_MaterialTextureSlot_COUNT; i++)
+			if (RT_ConfigReadString(&cfg, RT_StringLiteral("albedo_texture"), &string))
 			{
-				RT_String string;
-				if (RT_ConfigReadString(&cfg, RT_StringFromCString(g_rt_slot_keys[i]), &string) && string.count && string.bytes[0] != ' ')
-					RT_CopyStringToBufferNullTerm(string, sizeof(paths->textures[i]), paths->textures[i]);
+				RT_CopyStringToBufferNullTerm(string, sizeof(paths->albedo_texture), paths->albedo_texture);
 			}
 
-			bool roughness = RT_ConfigReadFloat(&cfg, RT_StringLiteral("roughness"), &material->roughness);
-			bool metalness = RT_ConfigReadFloat(&cfg, RT_StringLiteral("metalness"), &material->metalness);
-			if (has_roughness && roughness) *has_roughness = true;
-			if (has_metalness && metalness) *has_metalness = true;
+			if (RT_ConfigReadString(&cfg, RT_StringLiteral("normal_texture"), &string))
+			{
+				RT_CopyStringToBufferNullTerm(string, sizeof(paths->normal_texture), paths->normal_texture);
+			}
+
+			if (RT_ConfigReadString(&cfg, RT_StringLiteral("metalness_texture"), &string))
+			{
+				RT_CopyStringToBufferNullTerm(string, sizeof(paths->metalness_texture), paths->metalness_texture);
+			}
+
+			if (RT_ConfigReadString(&cfg, RT_StringLiteral("roughness_texture"), &string))
+			{
+				RT_CopyStringToBufferNullTerm(string, sizeof(paths->roughness_texture), paths->roughness_texture);
+			}
+
+			if (RT_ConfigReadString(&cfg, RT_StringLiteral("emissive_texture"), &string))
+			{
+				RT_CopyStringToBufferNullTerm(string, sizeof(paths->emissive_texture), paths->emissive_texture);
+			}
+
+			bool has_roughness = RT_ConfigReadFloat(&cfg, RT_StringLiteral("roughness"), &material->roughness);
+			bool has_metalness = RT_ConfigReadFloat(&cfg, RT_StringLiteral("metalness"), &material->metalness);
 			RT_ConfigReadVec3(&cfg, RT_StringLiteral("emissive_color"), &material->emissive_color);
 			RT_ConfigReadFloat(&cfg, RT_StringLiteral("emissive_strength"), &material->emissive_strength);
 
-			for (int i = 0; i < RT_ARRAY_COUNT(flag_keys); i++)
-			{
-				int value;
-				if (RT_ConfigReadInt(&cfg, RT_StringFromCString(flag_keys[i].key), &value))
-					material->flags = RT_SET_FLAG(material->flags, flag_keys[i].flag, value);
-			}
-		}
-	}
+			int blackbody = 0;
+			RT_ConfigReadInt(&cfg, RT_StringLiteral("blackbody"), &blackbody);
+			material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_BlackbodyRadiator, blackbody);
 
-	// Animated cloak and invulnerability sprites change substantially every
-	// frame. Mark them reactive so FSR does not treat their stippled/emissive
-	// pixels as stable history.
-	if (!strncmp(bitmap_name, "invuln_", 7) || !strncmp(bitmap_name, "cloak_", 6))
-	{
-		material->flags |= RT_MaterialFlag_Fsr2ReactiveMask;
+			int no_casting_shadow = 0;
+			RT_ConfigReadInt(&cfg, RT_StringLiteral("no_casting_shadow"), &no_casting_shadow);
+			material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_NoCastingShadow, no_casting_shadow);
+
+			int is_light = 0;
+			RT_ConfigReadInt(&cfg, RT_StringLiteral("is_light"), &is_light);
+			material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_Light, is_light);
+
+			int fsr2_reactive_mask = 0;
+			RT_ConfigReadInt(&cfg, RT_StringLiteral("fsr2_reactive_mask"), &fsr2_reactive_mask);
+			material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_Fsr2ReactiveMask, fsr2_reactive_mask);
+
+			if (default_roughness) *default_roughness = !has_roughness;
+			if (default_metalness) *default_metalness = !has_metalness;
+		}
+
+		// Animated cloak and invulnerability sprites change substantially every
+		// frame. Mark them reactive so FSR does not treat their stippled/emissive
+		// pixels as stable history.
+		if (!strncmp(bitmap_name, "invuln_", 7) || !strncmp(bitmap_name, "cloak_", 6))
+		{
+			material->flags |= RT_MaterialFlag_Fsr2ReactiveMask;
+		}
 	}
 }
 
@@ -456,11 +169,37 @@ static void RT_VerifyMaterialTexturesFromPaths(uint16_t bm_index, RT_MaterialPat
 	{
 		if (load_mask & RT_BITN(i))
 		{
-			char file[PATH_MAX];
-			int layer = paths->textures[i][0] ? RT_FindMaterialTexture(paths->textures[i], file, sizeof(file)) : -1;
+			// first see if compressed dds version of the file exists
+			RT_ArenaMemoryScope(&g_thread_arena)
+			{
+				char* dds_file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s.dds", paths->textures[i]);
 
-			paths_exist->textures[i] = layer >= 0;
-			g_rt_slot_layer[bm_index][i] = (signed char)layer;
+				FILE* f = fopen(dds_file, "r");
+
+				if (f)
+				{
+					fclose(f);
+					paths->textures[i];
+					paths_exist->textures[i] = true;
+				}
+			}
+
+			if (!paths_exist->textures[i]) // dds file not found try png
+			{
+				RT_ArenaMemoryScope(&g_thread_arena)
+				{
+					char* file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s.png", paths->textures[i]);
+
+					FILE* f = fopen(file, "r");
+
+					if (f)
+					{
+						fclose(f);
+						paths->textures[i];
+						paths_exist->textures[i] = true;
+					}
+				}
+			}
 		}
 	}
 }
@@ -476,61 +215,97 @@ static int RT_LoadMaterialTexturesFromPaths(uint16_t bm_index, RT_Material *mate
 	{
 		if (load_mask & RT_BITN(i))
 		{
-			char file[PATH_MAX];
-			int layer = paths->textures[i][0] ? RT_FindMaterialTexture(paths->textures[i], file, sizeof(file)) : -1;
-
-			g_rt_slot_layer[bm_index][i] = (signed char)layer;
-			if (layer < 0)
-				continue;
-
-			bool loaded = false;
+			// first try loading the compressed dds version of the file if it exists
+			bool dds_loaded = false, png_loaded = false;
 			RT_ArenaMemoryScope(&g_thread_arena)
 			{
 				RT_TextureFormat format = g_rt_material_texture_slot_formats[i];
 				bool is_srgb = (format == RT_TextureFormat_RGBA8_SRGB);
-				RT_String bytes = RT_ReadGameFile(&g_thread_arena, file);
-				RT_Image image = {0};
 
-				if (bytes.count && strstr(file, ".dds"))
+				char* dds_file = NULL;
+
+				// check for dds extension to already be part of texture path.
+				if (strstr(paths->textures[i], ".dds") || strstr(paths->textures[i], ".png"))
 				{
-					image = RT_LoadDDSFromMemory(bytes);
-					if (is_srgb)
-					{
-						image.format = RT_TextureFormatToSRGB(image.format);
-					}
+					dds_file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s", paths->textures[i]);
 				}
-				else if (bytes.count)
+				else
 				{
-					image = RT_LoadImageFromMemory(&g_thread_arena, bytes.bytes, bytes.count, g_rt_texture_format_bpp[format], is_srgb);
+					dds_file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s.dds", paths->textures[i]);
+				}
+
+				// TODO(daniel): It's dumb that RT_ArenaPrintF doesn't return an RT_String
+				RT_Image image = RT_LoadDDSFromDisk(&g_thread_arena, RT_StringFromCString(dds_file));
+
+				if (is_srgb)
+				{
+					image.format = RT_TextureFormatToSRGB(image.format);
+				}
+
+				if (image.pixels)
+				{
+					dds_loaded = true;
+
+					material->textures[i] = RT_UploadTexture(&(RT_UploadTextureParams) {
+						.image = image,
+						.name  = RT_ArenaPrintF(&g_thread_arena, "Game Texture %hu:%s (source: %s)", bm_index, g_rt_texture_slot_names[i], dds_file),
+					});
+
+					textures_reloaded += 1;
+				}
+			}
+
+			if (!dds_loaded && paths->textures[i][0]) // dds file not loaded try png
+			{
+				RT_ArenaMemoryScope(&g_thread_arena)
+				{
+					char* file = NULL;
+
+					// check for png extension to already be part of texture path.
+					if (strstr(paths->textures[i], ".png"))
+					{
+						file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s", paths->textures[i]);
+					}
+					else
+					{
+						file = RT_ArenaPrintF(&g_thread_arena, "assets/textures/%s.png", paths->textures[i]);
+					}
+
+					RT_TextureFormat format = g_rt_material_texture_slot_formats[i];
+
+					bool is_srgb = format == RT_TextureFormat_RGBA8_SRGB;
+					int  bpp     = g_rt_texture_format_bpp[format];
+
+					RT_Image image = RT_LoadImageFromDisk(&g_thread_arena, file, bpp, is_srgb);
 
 					// NOTE(daniel): Mildly sketchy code, that format check is checking it's an uncompressed format.
-					if (i == RT_MaterialTextureSlot_Emissive && image.pixels && image.format == format)
+					if (i == RT_MaterialTextureSlot_Emissive && image.format == format)
 					{
 						// Premultiply emissive by alpha to avoid white transparent backgrounds from showing...
 
 						uint32_t* at = (uint32_t*)image.pixels;
-						for (size_t p = 0; p < image.width * image.height; p++)
+						for (size_t i = 0; i < image.width * image.height; i++)
 						{
 							RT_Vec4 color = RT_UnpackRGBA(*at);
 							color.xyz = RT_Vec3Muls(color.xyz, color.w);
 							*at++ = RT_PackRGBA(color);
 						}
 					}
-				}
 
-				if (image.pixels)
-				{
-					loaded = true;
+					if (image.pixels)
+					{
+						png_loaded = true;
 
-					material->textures[i] = RT_UploadTexture(&(RT_UploadTextureParams) {
-						.image = image,
-						.name  = RT_ArenaPrintF(&g_thread_arena, "Game Texture %hu:%s (source: %s)", bm_index, g_rt_texture_slot_names[i], file),
-					});
+						material->textures[i] = RT_UploadTexture(&(RT_UploadTextureParams) {
+							.image = image,
+							.name  = RT_ArenaPrintF(&g_thread_arena, "Game Texture %hu:%s (source: %s)", bm_index, g_rt_texture_slot_names[i], file),
+						});
 
-					textures_reloaded += 1;
+						textures_reloaded += 1;
+					}
 				}
 			}
-			if (i == RT_MaterialTextureSlot_Albedo && loaded)
+			if (i == RT_MaterialTextureSlot_Albedo && (dds_loaded || png_loaded))
 				material->flags &= ~RT_MaterialFlag_GameBitmap;
 		}
 	}
@@ -538,74 +313,11 @@ static int RT_LoadMaterialTexturesFromPaths(uint16_t bm_index, RT_Material *mate
 	return textures_reloaded;
 }
 
-// Sets one material's properties and texture paths from code defaults, then the packs, then the loose files.
-// Doesn't touch loaded textures or the load state.
-static void RT_InitMaterialDefinition(uint16_t bm_index, const char *bitmap_name)
-{
-	RT_Material *material = &g_rt_materials[bm_index];
-	RT_MaterialPaths *paths = &g_rt_material_paths[bm_index];
-	RT_MaterialPathsExist *paths_exist = &g_rt_material_paths_exist[bm_index];
-
-	// ------------------------------------------------------------------
-	// Initialize all the defaults
-	material->metalness = 0.0f;
-	material->roughness = strncmp(bitmap_name, "rock", 4) == 0 ? 0.95f : 0.8f;
-	material->emissive_color = RT_Vec3FromScalar(1.0f);
-	material->emissive_strength = 1.0f;
-	material->flags &= ~(RT_MaterialFlag_BlackbodyRadiator | RT_MaterialFlag_NoCastingShadow | RT_MaterialFlag_Light | RT_MaterialFlag_Fsr2ReactiveMask);
-
-	if (strstr(bitmap_name, "metl"))
-	{
-		material->metalness = 1.0f;
-		material->roughness = 0.5f;
-	}
-
-	snprintf(paths->albedo_texture, sizeof(paths->albedo_texture), "%s_basecolor", bitmap_name);
-	snprintf(paths->normal_texture, sizeof(paths->normal_texture), "%s_normal", bitmap_name);
-	snprintf(paths->metalness_texture, sizeof(paths->metalness_texture), "%s_metallic", bitmap_name);
-	snprintf(paths->roughness_texture, sizeof(paths->roughness_texture), "%s_roughness", bitmap_name);
-	snprintf(paths->emissive_texture, sizeof(paths->emissive_texture), "%s_emissive", bitmap_name);
-
-	// ------------------------------------------------------------------
-
-	bool pack_metalness = false, pack_roughness = false, own_metalness = false, own_roughness = false;
-	g_rt_material_layers[bm_index] = 0;
-	RT_ApplyMaterialLayers(bm_index, material, paths, 1, g_rt_layer_count - 1, &pack_metalness, &pack_roughness);
-
-	// The defaults include the packs, so the editor saves only what differs from them
-	memcpy(&g_rt_materials_default[bm_index], material, sizeof(*material));
-	memcpy(&g_rt_material_paths_default[bm_index], paths, sizeof(*paths));
-
-	RT_ApplyMaterialLayers(bm_index, material, paths, 0, 0, &own_metalness, &own_roughness);
-
-	memset(paths_exist, 0, sizeof(*paths_exist));
-	RT_VerifyMaterialTexturesFromPaths(bm_index, paths, paths_exist, ~0u);
-
-	// AND ALSO make note of this quirk for the defaults, where after all that we should store the default
-	// metalness and roughness if it was affected by whether or not there was a metal/roughness map:
-	if (paths_exist->metalness_texture && !pack_metalness)
-	{
-		g_rt_materials_default[bm_index].metalness = 1.0f;
-		if (!own_metalness)
-			material->metalness = 1.0f;
-	}
-
-	if (paths_exist->roughness_texture && !pack_roughness)
-	{
-		g_rt_materials_default[bm_index].roughness = 1.0f;
-		if (!own_roughness)
-			material->roughness = 1.0f;
-	}
-}
-
-void RT_InitAllBitmaps(void)
+void RT_InitAllBitmaps(void) 
 {
 	// This function creates all materials for all GameBitmaps. It has no insight into
 	// the indirection of the Textures / ObjBitmaps / ObjBitmapPtrs arrays.
 	// - Daniel 01/03/2023
-
-	RT_LoadTexturePackList();
-	RT_MountTexturePacks();
 
 	// define a list of textures that always need to be loaded (sprites for example that can spawn at anytime)
 	char texture_always_load_list[][13] = //{"none"};
@@ -756,9 +468,57 @@ void RT_InitAllBitmaps(void)
 				}
 			}
 
+            // Try to load the material definition
 			RT_Material *material = &g_rt_materials[bm_index];
+			RT_MaterialPaths *paths = &g_rt_material_paths[bm_index];
+			RT_MaterialPathsExist* paths_exist = &g_rt_material_paths_exist[bm_index];
+
+			// ------------------------------------------------------------------
+			// Initialize all the defaults
 			material->texture_load_state = RT_MaterialTextureLoadState_Unloaded;
-			RT_InitMaterialDefinition(bm_index, bitmap_name);
+
+			material->metalness = 0.0f;
+			material->roughness = strncmp(bitmap_name, "rock", 4) == 0 ? 0.95f : 0.8f;
+			material->emissive_color = RT_Vec3FromScalar(1.0f);
+			material->emissive_strength = 1.0f;
+
+			if (strstr(bitmap_name, "metl"))
+			{
+				material->metalness = 1.0f;
+				material->roughness = 0.5f;
+			}
+
+			snprintf(paths->albedo_texture, sizeof(paths->albedo_texture), "%s_basecolor", bitmap_name);
+			snprintf(paths->normal_texture, sizeof(paths->normal_texture), "%s_normal", bitmap_name);
+			snprintf(paths->metalness_texture, sizeof(paths->metalness_texture), "%s_metallic", bitmap_name);
+			snprintf(paths->roughness_texture, sizeof(paths->roughness_texture), "%s_roughness", bitmap_name);
+			snprintf(paths->emissive_texture, sizeof(paths->emissive_texture), "%s_emissive", bitmap_name);
+
+			// ------------------------------------------------------------------
+
+			memcpy(&g_rt_materials_default[bm_index], material, sizeof(*material));
+			memcpy(&g_rt_material_paths_default[bm_index], paths, sizeof(*paths));
+
+			bool default_metalness, default_roughness;
+            RT_ParseMaterialDefinitionFile(bm_index, material, paths, &default_metalness, &default_roughness);
+
+			RT_VerifyMaterialTexturesFromPaths(bm_index, paths, paths_exist, ~0u);
+
+			if (default_metalness && paths_exist->metalness_texture)
+			{
+				material->metalness = 1.0f;
+				// AND ALSO make note of this quirk for the defaults, where after all that we should store the default
+				// metalness and roughness if it was affected by whether or not there was a metal/roughness map:
+				g_rt_materials_default[bm_index].metalness = material->metalness;
+			}
+
+			if (default_roughness && paths_exist->roughness_texture)
+			{
+				material->roughness = 1.0f;
+				// AND ALSO make note of this quirk for the defaults, where after all that we should store the default
+				// metalness and roughness if it was affected by whether or not there was a metal/roughness map:
+				g_rt_materials_default[bm_index].roughness = material->roughness;
+			}
 
 #if 0
 			if (!RT_RESOURCE_HANDLE_VALID(material->albedo_texture))
@@ -788,7 +548,6 @@ void RT_InitAllBitmaps(void)
 
 	}
 	RT_SyncMaterialStates();
-	RT_WriteTextureSourceReport();
 
 	piggy_bitmap_page_out_all();
 
@@ -882,8 +641,6 @@ int RT_ReloadMaterials(void)
 
 	int textures_reloaded = 0;
 
-	RT_IndexLayer(0); // pick up loose files saved since the last listing
-
 	for (uint16_t bm_index = 1; bm_index < MAX_BITMAP_FILES; bm_index++)
 	{
 		grs_bitmap *bitmap = &GameBitmaps[bm_index];
@@ -915,10 +672,8 @@ int RT_ReloadMaterials(void)
 		char *material_definition_path = RT_ArenaPrintF(&g_thread_arena, "%s.material", bitmap_file_name);
 		if (TextureFileIsOutdated(material_definition_path))
 		{
-			// Start from defaults + packs: starting from {0} blanked every slot the file didn't list,
-			// and the next save wrote those blanks out (how the 2026-11-26 wipe happened).
-			RT_MaterialPaths new_paths = g_rt_material_paths_default[bm_index];
-			RT_ApplyMaterialLayers(bm_index, material, &new_paths, 0, 0, NULL, NULL);
+			RT_MaterialPaths new_paths = {0};
+			RT_ParseMaterialDefinitionFile(bm_index, material, &new_paths, NULL, NULL);
 
 			for (size_t i = 0; i < RT_MaterialTextureSlot_COUNT; i++)
 			{
@@ -1228,26 +983,4 @@ void RT_MarkMaterialObsolete(int bm_index)
 {
 	//if (g_rt_materials[bm_index].texture_load_state == RT_MaterialTextureLoadState_Loaded)
 		g_rt_materials[bm_index].texture_load_state = RT_MaterialTextureLoadState_Obsolete;
-}
-
-void RT_ApplyTexturePacks(void)
-{
-	RT_SaveTexturePackList();
-	RT_MountTexturePacks();
-
-	for (uint16_t bm_index = 1; bm_index < MAX_BITMAP_FILES; bm_index++)
-	{
-		if (GameBitmaps[bm_index].bm_w == 0 || GameBitmaps[bm_index].bm_h == 0)
-			continue;
-
-		char bitmap_name[13];
-		piggy_get_bitmap_name(bm_index, bitmap_name);
-		for (char *c = bitmap_name; *c; c++)
-			if (*c == '#') *c = '_';
-
-		RT_InitMaterialDefinition(bm_index, bitmap_name);
-		RT_MarkMaterialObsolete(bm_index); // sync unloads it and loads it again from the new layers
-	}
-	RT_SyncMaterialStates();
-	RT_WriteTextureSourceReport();
 }

@@ -40,24 +40,6 @@ typedef struct RT_MaterialPathsExist
     };
 } RT_MaterialPathsExist;
 
-// Raytracer texture packs: zips in assets/texturepacks, ordered by assets/texturepacks.txt
-// (top line wins, a leading '-' turns one off). Loose assets/textures files override every pack.
-#define RT_MAX_TEXTURE_PACKS 16
-
-typedef struct RT_TexturePack
-{
-	char name[64];
-	bool enabled;
-	bool mounted;
-} RT_TexturePack;
-
-RT_API RT_TexturePack g_rt_texture_packs[RT_MAX_TEXTURE_PACKS];
-RT_API int g_rt_texture_pack_count;
-
-RT_API void RT_ApplyTexturePacks(void); // saves the pack list, remounts the packs and reloads every material
-RT_API const char *RT_GetTextureSource(int bm_index, int slot); // which layer a texture slot came from
-RT_API RT_Image RT_LoadLayeredImage(RT_Arena *arena, const char *file, int channel_count, bool is_srgb);
-
 RT_API void RT_InitAllBitmaps(void);
 RT_API void RT_UpdateAllBitmaps(void);
 RT_API int RT_ReloadMaterials(void); // Returns how many textures were reloaded
