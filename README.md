@@ -1,4 +1,4 @@
-![Crossplay with shield bubbles](images/crossplay-shields.png)
+![Shield bubbles in both builds](images/shield-bubbles.png)
 
 # D2X Parity: Raytracer × Redux SLikeNet
 
