@@ -1,3 +1,5 @@
+![Crossplay with shield bubbles](images/crossplay-shields.png)
+
 # D2X Parity: Raytracer × Redux SLikeNet
 
 **Two Descent 2 engines. One battlefield.**
