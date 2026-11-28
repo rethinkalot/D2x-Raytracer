@@ -247,7 +247,8 @@ typedef enum RT_MaterialFlags
 	RT_MaterialFlag_NoCastingShadow   = 0x2,
 	RT_MaterialFlag_Light             = 0x4,
 	RT_MaterialFlag_Fsr2ReactiveMask  = 0x8,
-	RT_MaterialFlag_GameBitmap        = 0x10
+	RT_MaterialFlag_GameBitmap        = 0x10,
+	RT_MaterialFlag_Flicker           = 0x40  // .material "flicker = 1": glow flickers (reactor walls); 0x20 is taken by the VR opaque path
 } RT_MaterialFlags;
 
 typedef enum RT_MaterialTextureSlot

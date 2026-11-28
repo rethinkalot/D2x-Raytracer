@@ -1,5 +1,5 @@
 blackbody = 1
-no_casting_shadow = 0
+no_casting_shadow = 1
 emissive_strength = 3.500000
-is_light = 1
+is_light = 0
 fsr2_reactive_mask = 1

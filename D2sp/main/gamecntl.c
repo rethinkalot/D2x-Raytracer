@@ -29,6 +29,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "console.h"
 #include "inferno.h"
 #include "game.h"
+#include "shieldfx.h"
 #include "player.h"
 #include "key.h"
 #include "object.h"
@@ -183,6 +184,7 @@ void transfer_energy_to_shield()
 	Players[Player_num].energy  -= e;
 	Players[Player_num].shields += e/CONVERTER_SCALE;
 	multi_send_ship_status(); // observers' energy bar
+	shieldfx_local_converting(); // energy pulses on the shield bubble
 
 	if (last_play_time > GameTime64)
 		last_play_time = 0;

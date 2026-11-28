@@ -674,6 +674,11 @@ span weapon_window_right_hires[] = {
 	{424,518},
 };
 
+#include "shieldfx.h"
+#ifdef OGL
+void ogl_set_bitmap_tint(float r, float g, float b, float a); // arch/ogl/ogl.c
+#endif
+
 static inline void hud_bitblt_free (int x, int y, int w, int h, grs_bitmap *bm)
 {
 #ifdef OGL
@@ -1873,6 +1878,18 @@ void draw_player_ship(int cloak_state,int x, int y)
 
 	gr_set_current_canvas(NULL);
 	hud_bitblt( HUD_SCALE_X(x), HUD_SCALE_Y(y), bm);
+#ifdef OGL
+	{
+		// Low shields: the ship gauge pulses red (same as the raytracer).
+		const float pulse = shieldfx_gauge_pulse();
+		if (pulse > 0.0f)
+		{
+			ogl_set_bitmap_tint(1.0f, 0.06f, 0.02f, pulse);
+			hud_bitblt( HUD_SCALE_X(x), HUD_SCALE_Y(y), bm);
+			ogl_set_bitmap_tint(1.0f, 1.0f, 1.0f, -1.0f);
+		}
+	}
+#endif
 	gr_settransblend(cloak_fade_value, GR_BLEND_NORMAL);
 	gr_rect(HUD_SCALE_X(x-3), HUD_SCALE_Y(y-3), HUD_SCALE_X(x+bm->bm_w+3), HUD_SCALE_Y(y+bm->bm_h+3));
 	gr_settransblend(GR_FADE_OFF, GR_BLEND_NORMAL);

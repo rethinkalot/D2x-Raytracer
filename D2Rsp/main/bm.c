@@ -45,6 +45,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "aistruct.h"
 #include "robot.h"
 #include "weapon.h"
+#include "laser.h"
 #include "customsnd.h"
 #include "gauges.h"
 #include "player.h"
@@ -177,6 +178,32 @@ int gamedata_init()
 	return 0;
 }
 
+// Raytracer: some pickups spin too fast with the HD sprites, so their animation clips run at
+// half speed (visual only; nothing in the game simulation reads these clip times). Runs after
+// every game-data load; remembers what it set, so a second call doesn't slow them again.
+#define RT_SLOW_PICKUP_FACTOR 2
+static void slow_pickup_animations(void)
+{
+	static fix applied[VCLIP_MAXNUM];
+	const int clips[] = {
+		Powerup_info[POW_PROXIMITY_WEAPON].vclip_num, // proximity bomb 4-pack
+		Weapon_info[PROXIMITY_ID].weapon_vclip,        // dropped proximity bomb
+		Powerup_info[POW_CLOAK].vclip_num,
+		Powerup_info[POW_INVULNERABILITY].vclip_num,
+		Powerup_info[POW_EXTRA_LIFE].vclip_num,
+	};
+	int i;
+	for (i = 0; i < (int)(sizeof(clips) / sizeof(clips[0])); i++)
+	{
+		const int v = clips[i];
+		if (v < 0 || v >= VCLIP_MAXNUM || Vclip[v].frame_time == 0 || Vclip[v].frame_time == applied[v])
+			continue;
+		Vclip[v].frame_time *= RT_SLOW_PICKUP_FACTOR;
+		Vclip[v].play_time  *= RT_SLOW_PICKUP_FACTOR;
+		applied[v] = Vclip[v].frame_time;
+	}
+}
+
 void load_extra_models()
 {
 	char **ship_textures;
@@ -207,6 +234,7 @@ void load_extra_models()
 		only_player_ship.model_num = N_polygon_models;
 		N_polygon_models++;
 	}
+	slow_pickup_animations();
 }
 
 void rt_init()

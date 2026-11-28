@@ -74,6 +74,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "editor/editor.h"
 #endif
 #include "collide.h"
+#include "shieldfx.h"
 #include "escort.h"
 #include "multibot.h"
 
@@ -2367,6 +2368,9 @@ void collide_player_and_weapon( object * playerobj, object * weapon, vms_vector 
 			weapon->ctype.laser_info.last_hitobj = playerobj-Objects;
 	}
 #endif
+
+	// Shield bubble ripple on other players (hits are seen by every client).
+	shieldfx_player_hit(playerobj, weapon, collision_point, damage);
 
 	if (playerobj->id == Player_num)
 	{

@@ -40,6 +40,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "ai.h"
 #include "weapon.h"
 #include "fireball.h"
+#include "shieldfx.h"
 #include "collide.h"
 #include "newmenu.h"
 #include "gameseq.h"
@@ -286,7 +287,9 @@ object *object_create_explosion_sub(object *objp, short segnum, vms_vector * pos
 										multi_send_damage(damage, obj0p->shields, obj_type, 0, DAMAGE_BLAST, objp);
 									}
 
-									// Explosions CAN be friendly fire.
+									// Splash damage hits the shields too: ripple on the
+									// side facing the blast. Explosions CAN be friendly fire.
+									shieldfx_player_hit(obj0p, objp, position, damage);
 									apply_damage_to_player(obj0p, killer, damage, 1);
 								}
 							}

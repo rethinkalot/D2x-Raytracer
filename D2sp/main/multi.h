@@ -275,6 +275,7 @@ void multi_send_destroy_controlcen(int objnum, int player);
 void multi_send_endlevel_start(int);
 void multi_send_player_explode(char type);
 void multi_send_message(void);
+void multi_send_dmax_shields(void);
 void multi_send_system_message(const char *message);
 void multi_send_obs_message(void);
 void multi_send_position(int objnum);

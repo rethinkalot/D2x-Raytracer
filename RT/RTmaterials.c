@@ -226,6 +226,8 @@ static void RT_ApplyMaterialFile(const char *material_file, RT_Material *materia
 		material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_Light, value);
 	if (RT_ConfigReadInt(&cfg, RT_StringLiteral("fsr2_reactive_mask"), &value))
 		material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_Fsr2ReactiveMask, value);
+	if (RT_ConfigReadInt(&cfg, RT_StringLiteral("flicker"), &value))
+		material->flags = RT_SET_FLAG(material->flags, RT_MaterialFlag_Flicker, value);
 }
 
 static void RT_VerifyMaterialTexturesFromPaths(uint16_t bm_index, RT_MaterialPaths* paths, RT_MaterialPathsExist* paths_exist, uint32_t load_mask)

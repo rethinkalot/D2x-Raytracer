@@ -5,6 +5,8 @@
 #include "segment.h"
 #include "textures.h"
 #include "gameseq.h"
+#include "game.h"
+#include <math.h>
 #include "wall.h"
 #include "automap.h"
 #include "render.h"
@@ -542,6 +544,26 @@ void RT_UpdateLight(int index)
 	
 }
 
+// Monitor signs (misc060) flash low green with the odd white flicker, like a live screen.
+// The light goes out with the sign (RT_BlowUpLight); the definition's emission sets the level.
+static void RT_FlashSignLights(void)
+{
+	const float t = (float)((double)GameTime64 / 65536.0);
+	for (int i = 0; i < m_light_count; i++)
+	{
+		const RT_LightDefinition *def = &g_light_definitions[m_lights_definitions[i]];
+		if (strncmp(def->name, "misc060", 7) != 0)
+			continue;
+		const float phase = (float)i * 1.7f;
+		const float pulse = 0.55f + 0.45f * (0.5f + 0.5f * sinf(t * 7.3f + phase));
+		const float white = powf(0.5f + 0.5f * sinf(t * 2.1f + phase * 0.6f), 8.0f);
+		const float spark = fmodf(t * 9.0f + phase, 4.0f) < 0.18f ? 1.6f : 1.0f;
+		const float level = (def->emission.x + def->emission.y + def->emission.z) / 3.0f;
+		RT_Vec3 c = RT_Vec3Add(RT_Vec3Muls(def->emission, 1.0f - white), RT_Vec3FromScalar(level * 1.2f * white));
+		m_lights[i].emission = RT_PackRGBE(RT_Vec3Muls(c, pulse * spark * g_light_multiplier));
+	}
+}
+
 void RT_FindAndSubmitNearbyLights(RT_Vec3 player_pos)
 {
 	int total = 0;
@@ -558,6 +580,7 @@ void RT_FindAndSubmitNearbyLights(RT_Vec3 player_pos)
 			RT_VisualizeLight(&m_lights[i]);
 		}
 	}
+	RT_FlashSignLights();
 
 	if (light_culling_heuristic == 0){
 		for (int i = 0; i < m_light_count; i++) 

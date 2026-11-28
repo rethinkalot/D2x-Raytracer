@@ -1925,6 +1925,13 @@ void ogl_freebmtexture(grs_bitmap *bm){
 /*
  * Menu / gauges 
  */
+// Optional colour + alpha for the next ogl_ubitmapm_cs draws (shield gauge pulse); a < 0 = off.
+static GLfloat ogl_bitmap_tint[4] = { 1.0f, 1.0f, 1.0f, -1.0f };
+void ogl_set_bitmap_tint(float r, float g, float b, float a)
+{
+	ogl_bitmap_tint[0] = r; ogl_bitmap_tint[1] = g; ogl_bitmap_tint[2] = b; ogl_bitmap_tint[3] = a;
+}
+
 bool ogl_ubitmapm_cs(int x, int y,int dw, int dh, grs_bitmap *bm,int c, int scale) // to scale bitmaps
 {
 	GLfloat xo,yo,xf,yf,u1,u2,v1,v2,color_r,color_g,color_b,h;
@@ -1994,10 +2001,15 @@ bool ogl_ubitmapm_cs(int x, int y,int dw, int dh, grs_bitmap *bm,int c, int scal
 		color_b = CPAL2Tb(c);
 	}  
 
+	if (ogl_bitmap_tint[3] >= 0.0f) {
+		color_r = ogl_bitmap_tint[0];
+		color_g = ogl_bitmap_tint[1];
+		color_b = ogl_bitmap_tint[2];
+	}
 	color_array[0] = color_array[4] = color_array[8] = color_array[12] = color_r;
 	color_array[1] = color_array[5] = color_array[9] = color_array[13] = color_g;
 	color_array[2] = color_array[6] = color_array[10] = color_array[14] = color_b;
-	color_array[3] = color_array[7] = color_array[11] = color_array[15] = 1.0;
+	color_array[3] = color_array[7] = color_array[11] = color_array[15] = ogl_bitmap_tint[3] >= 0.0f ? ogl_bitmap_tint[3] : 1.0;
 
 	vertex_array[0] = xo;
 	vertex_array[1] = yo;

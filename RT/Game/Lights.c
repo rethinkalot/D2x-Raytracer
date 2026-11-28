@@ -229,6 +229,54 @@ RT_LightDefinition g_light_definitions[] =
 		.spot_softness = 0.2f,
 	},
 	{
+		.name = "misc060#0", // Z monitor sign: low green/white flashing glow (level.c RT_FlashSignLights)
+		.kind = RT_LightKind_Area_Rect,
+		.emission = {0.5f,1.5f,0.6f},
+		.radius = 0.8f,
+		.spot_angle = 0.3f,
+		.spot_softness = 0.2f,
+	},
+	{
+		.name = "misc060#1", // Z monitor sign: low green/white flashing glow (level.c RT_FlashSignLights)
+		.kind = RT_LightKind_Area_Rect,
+		.emission = {0.5f,1.5f,0.6f},
+		.radius = 0.8f,
+		.spot_angle = 0.3f,
+		.spot_softness = 0.2f,
+	},
+	{
+		.name = "misc060#2", // Z monitor sign: low green/white flashing glow (level.c RT_FlashSignLights)
+		.kind = RT_LightKind_Area_Rect,
+		.emission = {0.5f,1.5f,0.6f},
+		.radius = 0.8f,
+		.spot_angle = 0.3f,
+		.spot_softness = 0.2f,
+	},
+	{
+		.name = "misc060#3", // Z monitor sign: low green/white flashing glow (level.c RT_FlashSignLights)
+		.kind = RT_LightKind_Area_Rect,
+		.emission = {0.5f,1.5f,0.6f},
+		.radius = 0.8f,
+		.spot_angle = 0.3f,
+		.spot_softness = 0.2f,
+	},
+	{
+		.name = "misc060#4", // Z monitor sign: low green/white flashing glow (level.c RT_FlashSignLights)
+		.kind = RT_LightKind_Area_Rect,
+		.emission = {0.5f,1.5f,0.6f},
+		.radius = 0.8f,
+		.spot_angle = 0.3f,
+		.spot_softness = 0.2f,
+	},
+	{
+		.name = "misc060#5", // Z monitor sign: low green/white flashing glow (level.c RT_FlashSignLights)
+		.kind = RT_LightKind_Area_Rect,
+		.emission = {0.5f,1.5f,0.6f},
+		.radius = 0.8f,
+		.spot_angle = 0.3f,
+		.spot_softness = 0.2f,
+	},
+	{
 		.name = "misc086",
 		.kind = RT_LightKind_Area_Rect,
 		.emission = {2.f,2.f,2.f},

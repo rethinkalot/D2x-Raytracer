@@ -98,6 +98,7 @@ typedef struct player_config
 	ubyte PreferMyTeamColors;
 	ubyte QuietPlasma;
 	int AlphaEffects;
+	ubyte ShieldEffects;    // shield bubbles (yours and other players') and the gauge pulse
 	int DynLightColor;
 	ubyte DisableCockpit;  /* DisableCockpit */
 	ubyte StickyRearview; /* StickyRearview */

@@ -19,6 +19,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 
 
 #include <stdlib.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 #include "pstypes.h"
@@ -46,6 +47,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "state.h"
 #include "movie.h"
 #include "menu.h"
+#include "config.h"
 #include "mouse.h"
 #include "console.h"
 #include "args.h"
@@ -673,6 +675,8 @@ void put_char_delay(briefing *br, int ch)
 }
 
 void init_spinning_robot(briefing *br);
+static int briefing_robot_for_movie(char letter, int prefer_3d);
+static void init_spinning_robot_d2(briefing *br);
 int load_briefing_screen(briefing *br, char *fname);
 
 // Process a character for the briefing,
@@ -743,7 +747,26 @@ int briefing_process_char(briefing *br)
 				kludge=*br->message++;
 				spinRobotName[2]=kludge; // ugly but proud
 
-				br->robot_playing=InitRobotMovie(spinRobotName);
+				// 3D Briefing Robots (as in D2s): the raytraced live model instead of the movie;
+				// also used whenever the movie can't play (e.g. -nomovies).
+				if (briefing_robot_for_movie(kludge, 1) >= 0)
+					br->robot_num = briefing_robot_for_movie(kludge, 1);
+				else
+				{
+					br->robot_playing=InitRobotMovie(spinRobotName);
+					if (!br->robot_playing)
+						br->robot_num = briefing_robot_for_movie(kludge, 0);
+				}
+				if (br->robot_num >= 0)
+				{
+					init_spinning_robot_d2(br);
+#ifdef RT_DX12
+					paging_touch_model(Robot_info[br->robot_num].model_num);
+					void RT_UpdatePagedIn(void);
+					RT_UpdatePagedIn();
+					RT_SyncMaterialStates(); // HD robot textures ready for the first frame
+#endif
+				}
 
 				// gr_remap_bitmap_good( &grd_curcanv->cv_bitmap, pal, -1, -1 );
 
@@ -1117,6 +1140,33 @@ void show_briefing_bitmap(grs_bitmap *bmp)
 }
 
 //-----------------------------------------------------------------------------
+// D2's briefing robot movies rba.mve .. rby.mve and the robot type each one shows (from D2s), so a
+// briefing can draw the robot as a live 3D model instead of the 160x88 movie. -1 = no robot.
+static const signed char briefing_movie_robot[26] = {
+	24, 25, 34, 26, 27, 28, 29, 30, 51, 33, 36, 49, 37,	// a .. m
+	38, 50, 39, 61, 40, 43, 42, 44, -1, 47, 48, 41, -1	// n .. z
+};
+
+// The robot type for a movie letter: with 3D Briefing Robots on (prefer_3d), or when the movie
+// can't play (prefer_3d == 0). -1 = play the movie / nothing to show.
+static int briefing_robot_for_movie(char letter, int prefer_3d)
+{
+	int r;
+	if (prefer_3d && !GameCfg.BriefingRobots3D)
+		return -1;
+	if (tolower((unsigned char)letter) < 'a' || tolower((unsigned char)letter) > 'z')
+		return -1;
+	r = briefing_movie_robot[tolower((unsigned char)letter) - 'a'];
+	return (r >= 0 && r < N_robot_types && Robot_info[r].model_num >= 0) ? r : -1;
+}
+
+// Where D2 draws its robot movies: 160x88 at (SWIDTH/2.3, SHEIGHT/2.3) on a 320x200 layout, scaled.
+static void init_spinning_robot_d2(briefing *br)
+{
+	float scale = min((float)SWIDTH / 320, (float)SHEIGHT / 200);
+	br->robot_canv = gr_create_sub_canvas(grd_curcanv, SWIDTH / 2.3, SHEIGHT / 2.3, 160 * scale, 88 * scale);
+}
+
 void init_spinning_robot(briefing *br) //(int x,int y,int w,int h)
 {
 	int x = rescale_x(138);

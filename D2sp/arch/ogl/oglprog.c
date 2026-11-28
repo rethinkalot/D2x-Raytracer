@@ -63,7 +63,10 @@ GLuint ogl_mk_prog(const char *vert_src, const char *frag_src) {
 	return prog;
 }
 
+#include "../../main/shieldfx_gl.h"
+
 void ogl_init_prog() {
+	ogl_init_shield_prog(); // shield bubbles (shieldgl.c)
 	ogl_prog_tex2 = ogl_mk_prog("attribute vec3 apos;"
 		"\n attribute vec4 acolor;"
 		"\n attribute vec2 atexcoord;"
@@ -130,6 +133,7 @@ void ogl_init_prog() {
 }
 
 void ogl_done_prog() {
+	ogl_done_shield_prog();
 	if (ogl_prog_tex2m) {
 		glDeleteProgram(ogl_prog_tex2m);
 		ogl_prog_tex2m = 0;

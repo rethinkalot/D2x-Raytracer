@@ -52,6 +52,10 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #include "effects.h"
 #include "playsave.h"
 #include "config.h"
+#include "shieldfx.h"
+#ifdef OGL
+#include "shieldfx_gl.h"
+#endif
 #ifdef OGL
 #include "ogl_init.h"
 #endif
@@ -1691,6 +1695,15 @@ void render_frame(fix eye_offset, int window_num)
 	#endif
 
 	render_mine(start_seg_num, eye_offset, window_num);
+
+#ifdef OGL
+	// Shield bubbles on players (same effect as the raytracer), main view only.
+	if (window_num == 0)
+	{
+		shieldfx_frame();
+		ogl_draw_shield_bubbles();
+	}
+#endif
 
 	g3_end_frame();
 

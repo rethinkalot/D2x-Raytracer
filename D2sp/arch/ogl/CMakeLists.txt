@@ -4,7 +4,7 @@ add_library(arch_ogl STATIC
     )
 
 if(OPENGLMERGE)
-   target_sources(arch_ogl PRIVATE oglprog.c)
+   target_sources(arch_ogl PRIVATE oglprog.c shieldgl.c)
 endif()
 
 include_directories(../../include ../include ../../main)

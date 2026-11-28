@@ -54,6 +54,7 @@ add_executable (d2x-redux
     polyobj.c
     powerup.c
     render.c
+    shieldfx.c
     robot.c
     scores.c
     segment.c

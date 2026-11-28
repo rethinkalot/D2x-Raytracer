@@ -1997,7 +1997,7 @@ void reticle_config()
 int opt_gr_briefingrobots3d;
 int opt_gr_texfilt, opt_gr_movietexfilt, opt_gr_brightness, opt_gr_reticlemenu, opt_gr_alphafx, opt_gr_dynlightcolor, opt_gr_vsync, opt_gr_multisample, opt_gr_fpsindi, opt_gr_disablecockpit;
 int opt_gr_classicdepth;
-int opt_gr_custommodels, opt_gr_customtextures, opt_gr_reducedflash, opt_gr_fov;
+int opt_gr_custommodels, opt_gr_customtextures, opt_gr_reducedflash, opt_gr_fov, opt_gr_shieldfx;
 static char gr_fov_label[24];
 int graphics_config_menuset(newmenu *menu, d_event *event, void *userdata)
 {
@@ -2047,7 +2047,7 @@ void graphics_config()
 {
 #ifdef OGL
 	// +1 headroom for the conditional VSync item (see gr_vsync_supported); the menu already uses 20 items without it.
-	newmenu_item m[23]; // +1 for 3D Briefing Robots
+	newmenu_item m[25]; // +1 for 3D Briefing Robots, +1 FOV, +1 Shield Effects
 	int i = 0;
 #else
 	// +1 headroom for the conditional VSync item (see gr_vsync_supported).
@@ -2085,6 +2085,8 @@ void graphics_config()
 #ifdef OGL
 	opt_gr_alphafx = nitems;
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Transparency Effects"; m[nitems].value = PlayerCfg.AlphaEffects; nitems++;
+	opt_gr_shieldfx = nitems;
+	m[nitems].type = NM_TYPE_CHECK; m[nitems].text = "Shield Effects"; m[nitems].value = PlayerCfg.ShieldEffects; nitems++;
 	opt_gr_dynlightcolor = -1; // hidden from the menu (setting kept in the pilot file)
 // VSync option is shown ONLY when the video backend can genuinely control vsync
 // (see gr_vsync_supported()). On the current SDL 1.2 backend it stays hidden,
@@ -2107,8 +2109,7 @@ void graphics_config()
 		// Sentinel, so the read-back below can never index the wrong entry.
 		opt_gr_vsync = -1;
 	}
-	opt_gr_multisample = nitems;
-	m[nitems].type = NM_TYPE_CHECK; m[nitems].text="4x multisampling"; m[nitems].value = GameCfg.Multisample; nitems++;
+	opt_gr_multisample = -1; // hidden from the menu (setting kept in descent.cfg)
 	opt_gr_classicdepth = -1; // hidden from the menu (setting kept in descent.cfg)
 	opt_gr_custommodels = nitems;
 	m[nitems].type = NM_TYPE_CHECK; m[nitems].text="3D Models"; m[nitems].value = GameCfg.UseCustomModels; nitems++;
@@ -2157,13 +2158,15 @@ void graphics_config()
 	GameCfg.MovieTexFilt = m[opt_gr_movietexfilt].value;
 	GameCfg.BriefingRobots3D = m[opt_gr_briefingrobots3d].value;
 	PlayerCfg.AlphaEffects = m[opt_gr_alphafx].value;
+	PlayerCfg.ShieldEffects = m[opt_gr_shieldfx].value;
 	if (opt_gr_dynlightcolor >= 0)
 		PlayerCfg.DynLightColor = m[opt_gr_dynlightcolor].value;
 	// The VSync item only exists when the backend supports vsync, so only read it
 	// back in that case. opt_gr_vsync is -1 otherwise (see graphics_config).
 	if (opt_gr_vsync >= 0)
 		GameCfg.VSync = m[opt_gr_vsync].value;
-	GameCfg.Multisample = m[opt_gr_multisample].value;
+	if (opt_gr_multisample >= 0)
+		GameCfg.Multisample = m[opt_gr_multisample].value;
 	if (opt_gr_classicdepth >= 0)
 		GameCfg.ClassicDepth = m[opt_gr_classicdepth].value;
 	if (GameCfg.UseCustomModels != m[opt_gr_custommodels].value)

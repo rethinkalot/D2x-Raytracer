@@ -126,6 +126,7 @@ struct RT_Triangle
 #define RT_MaterialFlag_Light             (0x4)
 #define RT_MaterialFlag_Fsr2ReactiveMask  (0x8)
 #define RT_MaterialFlag_GameBitmap (0x10)
+#define RT_MaterialFlag_Flicker    (0x40)
 
 // @Volatile: Must match RT_LightKind in ApiTypes.h
 #define RT_LightKind_Area_Sphere (0)

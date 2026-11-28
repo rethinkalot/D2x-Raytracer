@@ -69,6 +69,7 @@ COPYRIGHT 1993-1999 PARALLAX SOFTWARE CORPORATION.  ALL RIGHTS RESERVED.
 #ifdef USE_UDP
 #include "net_udp.h"
 #include "customsnd.h"
+#include "shieldfx.h"
 #endif
 
 void multi_reset_player_object(object *objp);
@@ -1441,6 +1442,8 @@ void multi_do_frame(void)
     }
 
     multi_send_message(); // Send any waiting messages
+
+	multi_send_dmax_shields(); // for other players' shield bubbles (D2s and raytracer)
 
     if (Game_mode & GM_MULTI_ROBOTS)
     {
@@ -6895,6 +6898,71 @@ static void multi_send_change_map(const char *mission, int level)
 // A change from the host: only stored here, it starts at the beginning of the next game frame
 // (multi_change_map_frame). The id makes a resent copy harmless, even after the level sync has cleared
 // the packet filter.
+// Our shield level and invulnerability, for the other players' shield
+// bubbles: sent when they change (at most ~12 per second) and once a second.
+//   [0] type  [1] player  [2..3] shields in 1/16 points
+//   [4] bit 0 invulnerable, bit 1 converting energy to shields
+//   [5..6] seconds invulnerable, [7..8] seconds left
+//   (both 1/64 s; left = 0xFFFF for no time limit)
+void multi_send_dmax_shields(void)
+{
+	static fix64 last_sent = 0;
+	static int last_points = -1000, last_invul = -1, last_converting = -1;
+	ubyte buf[9];
+	const fix shields = Players[Player_num].shields;
+	const int invul = (Players[Player_num].flags & PLAYER_FLAGS_INVULNERABLE) ? 1 : 0;
+	const int converting = shieldfx_is_local_converting();
+	const int points = shields < F1_0 ? (shields < 0 ? -1 : 0) : f2i(shields);
+	const fix64 since = GameTime64 - last_sent;
+	int quantized;
+	fix64 elapsed = 0, remaining = 0;
+
+	if (!(Game_mode & GM_NETWORK) || Player_num < 0)
+		return;
+	if (since >= 0 && since < F1_0 &&
+		!((points != last_points || invul != last_invul || converting != last_converting) && since >= F1_0 / 12))
+		return;
+
+	last_sent = GameTime64;
+	last_points = points;
+	last_invul = invul;
+	last_converting = converting;
+
+	quantized = shields <= 0 ? 0 : (int)(shields >> 12);
+	if (quantized > 0xFFFF)
+		quantized = 0xFFFF;
+	if (invul)
+	{
+		elapsed = GameTime64 - Players[Player_num].invulnerable_time;
+		remaining = Players[Player_num].invulnerable_time + INVULNERABLE_TIME_MAX - GameTime64;
+		if (elapsed < 0) elapsed = 0;
+		if (remaining < 0) remaining = 0;
+	}
+
+	buf[0] = MULTI_DMAX_SHIELDS;
+	buf[1] = (ubyte)Player_num;
+	PUT_INTEL_SHORT(buf + 2, (unsigned short)quantized);
+	buf[4] = (ubyte)(invul | (converting << 1));
+	PUT_INTEL_SHORT(buf + 5, (unsigned short)(elapsed >= ((fix64)0xFFFE << 10) ? 0xFFFE : (elapsed >> 10)));
+	PUT_INTEL_SHORT(buf + 7, (unsigned short)(remaining >= ((fix64)0xFFFE << 10) ? 0xFFFF : (remaining >> 10)));
+	multi_send_data(buf, 9, 0);
+}
+
+void multi_do_dmax_shields(const ubyte *buf)
+{
+	const int pnum = buf[1];
+	const fix shields = (fix)((unsigned short)GET_INTEL_SHORT(buf + 2)) << 12;
+	const int invul = (buf[4] & 1) != 0;
+	const int converting = (buf[4] & 2) != 0;
+	const fix elapsed = (fix)((unsigned short)GET_INTEL_SHORT(buf + 5)) << 10;
+	const unsigned short left = (unsigned short)GET_INTEL_SHORT(buf + 7);
+	const fix remaining = left == 0xFFFF ? -1 : ((fix)left << 10);
+
+	if (pnum < 0 || pnum >= MAX_PLAYERS || pnum == Player_num)
+		return;
+	shieldfx_remote_state(pnum, shields, invul, converting, elapsed, remaining);
+}
+
 void multi_do_change_map(const ubyte *buf)
 {
 	if (buf[1] != multi_who_is_master() || buf[11] < 1)	// only the host changes the map
@@ -7631,7 +7699,7 @@ void multi_process_data(const ubyte *buf, int len)
         case MULTI_CHANGE_MAP:
             multi_do_change_map(buf); break;
         case MULTI_DMAX_SHIELDS:
-            break; // raytracer players' shield state, for shield bubbles (not drawn in D2s yet)
+            multi_do_dmax_shields(buf); break;
         default:
             Int3();
     }

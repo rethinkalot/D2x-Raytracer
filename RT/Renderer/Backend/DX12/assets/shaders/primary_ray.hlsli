@@ -377,6 +377,18 @@ void GetHitGeometryFromRay(RayDesc ray,
             OUT.albedo *= color_mod.rgb;
             OUT.emissive *= color_mod.rgb;
             OUT.emissive *= emissive_factor;
+
+            // Flickering glow (reactor walls): faint and uneven most of the time, a whitish
+            // flash now and then; a new state every couple of frames, each wall out of step.
+            if (hit_material.flags & RT_MaterialFlag_Flicker)
+            {
+                const uint step = g_global_cb.frame_index / 2;
+                const float seed = float(step) + float(OUT.hit_triangle.segment) * 37.0;
+                const float h = frac(sin(seed * 12.9898) * 43758.5453);
+                const float level = 0.45 + 0.30 * h;
+                const float glow = dot(OUT.emissive, float3(0.3, 0.59, 0.11));
+                OUT.emissive = h > 0.86 ? lerp(OUT.emissive, glow.xxx * 1.6, 0.65) * 1.25 : OUT.emissive * level;
+            }
         }
     }
 }
