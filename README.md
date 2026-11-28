@@ -1,5 +1,3 @@
-![D2X Raytracer](D2Rsp/assets/scrn0004.png)
-
 # D2X Parity: Raytracer × Redux SLikeNet
 
 **Two Descent 2 engines. One battlefield.**
